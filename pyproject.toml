@@ -6,7 +6,3 @@ requires-python = ">=3.13"
 dependencies = [
   "websockets>=15.0"
 ]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["scripts"]

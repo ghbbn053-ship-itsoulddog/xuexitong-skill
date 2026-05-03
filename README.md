@@ -47,15 +47,14 @@ xuexitong/
 │   ├── background.js
 │   ├── content.js
 │   └── manifest.json
-├── scripts/          # Python CLI 桥梁
-│   ├── cli.py        # 27 条命令的统一入口
-│   ├── bridge_server.py  # WebSocket 服务端
-│   └── xxt/          # 页面逻辑库
-│       ├── bridge.py
-│       ├── page_state.py
-│       └── selectors.py
-├── tests/            # 单元测试
-└── docs/             # 架构 & 页面文档
+└── scripts/          # Python CLI 桥梁
+    ├── cli.py        # 27 条命令的统一入口
+    ├── bridge_server.py  # WebSocket 服务端
+    ├── smoke_eval.py # 端到端冒烟测试
+    └── xxt/          # 页面逻辑库
+        ├── bridge.py
+        ├── page_state.py
+        └── selectors.py
 ```
 
 ## 典型对话
