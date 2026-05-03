@@ -1205,6 +1205,34 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
     enc = getattr(args, "enc", None) or None
     max_chapters = getattr(args, "max_chapters", 999) or 999
 
+    # --- 进度持久化：同名课程续跑，换课程重置 ---
+    existing = load_runtime_state()
+    same_course = (
+        existing.get("course_id") == course_id
+        and existing.get("loop_active")
+    )
+
+    if same_course:
+        # 续跑：保留已完成章节和视频计数
+        completed_chapters = existing.get("completed_chapters", [])
+        blocked_items = existing.get("blocked_items", [])
+        total_videos_watched = existing.get("total_videos_watched", 0)
+        last_chapter_id = existing.get("last_completed_chapter_id")
+        last_task_num = existing.get("last_completed_task_num", 0)
+        resume_msg = (
+            f"续跑模式：已完成 {len(completed_chapters)} 章，"
+            f"{total_videos_watched} 个视频"
+        )
+        if last_chapter_id:
+            resume_msg += f"，上次停在章节 {last_chapter_id} 任务点 {last_task_num}"
+        print_json({"ok": True, "command": "run-course", "action": "resuming", "detail": resume_msg})
+    else:
+        completed_chapters = []
+        blocked_items = []
+        total_videos_watched = 0
+        last_chapter_id = None
+        last_task_num = 0
+
     merge_runtime_state(
         course_id=course_id,
         clazz_id=clazz_id,
@@ -1212,9 +1240,11 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
         enc=enc,
         pause_requested=False,
         loop_active=True,
-        completed_chapters=[],
-        blocked_items=[],
-        total_videos_watched=0,
+        completed_chapters=completed_chapters,
+        blocked_items=blocked_items,
+        total_videos_watched=total_videos_watched,
+        last_completed_chapter_id=last_chapter_id,
+        last_completed_task_num=last_task_num,
     )
 
     chapter_task_url = (
@@ -1332,7 +1362,9 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
                         # 视频已结束，跳到下一任务点
                         task_num += 1
                         merge_runtime_state(
-                            total_videos_watched=rt.get("total_videos_watched", 0) + 1
+                            total_videos_watched=rt.get("total_videos_watched", 0) + 1,
+                            last_completed_chapter_id=chapter_id,
+                            last_completed_task_num=task_num,
                         )
                         goto_study_page_from_state(page)
                         time.sleep(2)
@@ -1409,7 +1441,9 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
 
         chapters_processed += 1
         merge_runtime_state(
-            completed_chapters=rt.get("completed_chapters", []) + [chapter_id]
+            completed_chapters=rt.get("completed_chapters", []) + [chapter_id],
+            last_completed_chapter_id=chapter_id,
+            last_completed_task_num=0,
         )
         page.navigate(chapter_task_url)
         page.wait_for_load(20)

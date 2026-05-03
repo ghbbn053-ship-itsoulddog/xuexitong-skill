@@ -2,7 +2,7 @@ const BRIDGE_URL = "ws://localhost:9333";
 let ws = null;
 let lastKnownTabId = null;
 
-chrome.alarms.create("keepAlive", { periodInMinutes: 0.4 });
+chrome.alarms.create("keepAlive", { periodInMinutes: 2 });
 chrome.alarms.onAlarm.addListener(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) connect();
 });
@@ -215,6 +215,14 @@ async function cmdEvaluateViaDebugger(tabId, method, params) {
 
 async function cmdDom(method, params) {
   const tab = await getActiveTab();
+
+  // frame_evaluate operates inside iframes under the page's own CSP — the
+  // content script's new Function() will be blocked (no unsafe-eval).  Always
+  // route it through the debugger path, which bypasses CSP entirely.
+  if (method === "frame_evaluate") {
+    return await cmdDomViaDebugger(tab.id, method, params);
+  }
+
   try {
     const response = await chrome.tabs.sendMessage(tab.id, { method, params }, { frameId: 0 });
     if (response?.error) {
@@ -226,7 +234,11 @@ async function cmdDom(method, params) {
     if (
       msg.includes("Blocked") ||
       msg.includes("Receiving end does not exist") ||
-      msg.includes("未知命令")
+      msg.includes("未知命令") ||
+      msg.includes("CSP_BLOCKED") ||
+      msg.includes("unsafe-eval") ||
+      msg.includes("Content Security Policy") ||
+      msg.includes("Refused to evaluate")
     ) {
       return await cmdDomViaDebugger(tab.id, method, params);
     }

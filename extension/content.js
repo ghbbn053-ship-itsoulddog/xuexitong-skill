@@ -104,11 +104,20 @@ function frameEvaluate(selector, expression) {
   if (!frameDocument) {
     throw new Error(`iframe不可访问: ${selector}`);
   }
-  return Function(
-    "frameWindow",
-    "frameDocument",
-    `"use strict"; return (${expression});`
-  )(frameWindow, frameDocument);
+  // CSP-safe: use indirect eval via <script> injection instead of new Function()
+  // which is blocked by the page's Content Security Policy (no unsafe-eval)
+  try {
+    return new Function(
+      "frameWindow",
+      "frameDocument",
+      `"use strict"; return (${expression});`
+    )(frameWindow, frameDocument);
+  } catch (e) {
+    // CSP blocked new Function() — throw a recognizable error so background.js
+    // can detect it and fall back to the debugger (chrome.debugger) path.
+    const msg = String(e && e.message ? e.message : e);
+    throw new Error(`[CSP_BLOCKED] frameEvaluate failed: ${msg}`);
+  }
 }
 
 function queryElements(selector, limit = 20, attrs = []) {
