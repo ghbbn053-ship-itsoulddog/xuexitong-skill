@@ -1,21 +1,10 @@
 ---
 name: xuexitong
-description: |
-  超星学习通课程自动化助手。支持登录状态检查、课程列表与进度读取、
-  视频任务自动播放、整门课无人值守循环刷完。
-  CLI 输出统一为 JSON，可与任意 AI agent 编排。
+description: 超星学习通课程自动化助手——课程列表、章节导航、视频自动播放、整门课无人值守全自动刷完
 version: 0.2.0
 author: ghbbn053-ship-itsoulddog
 homepage: https://github.com/ghbbn053-ship-itsoulddog/xuexitong-skill
-requires:
-  bins:
-    - python (>=3.13)
-  env:
-    - XUEXITONG_ROOT (项目根目录的绝对路径，例如 /home/user/xuexitong-skill 或 C:\\Users\\xxx\\xuexitong-skill)
-  services:
-    - Chrome 浏览器 + XXT Bridge 扩展（已加载并连接）
-    - bridge server 已启动 (ws://localhost:9333)
-emoji: "🎓"
+metadata: {"openclaw": {"requires": {"bins": ["python"], "env": ["XUEXITONG_ROOT"]}, "emoji": "🎓"}}
 ---
 
 # 学习通自动化 Skill
@@ -26,15 +15,13 @@ emoji: "🎓"
 
 在执行任何命令之前，你必须先找到本项目的 `scripts/cli.py`。按以下顺序尝试：
 
-1. 如果环境变量 `XUEXITONG_ROOT` 已设置 → CLI 路径为 `$XUEXITONG_ROOT/scripts/cli.py`
-   - Linux / Mac：`$XUEXITONG_ROOT/scripts/cli.py`
-   - Windows：`%XUEXITONG_ROOT%/scripts/cli.py`
+1. 如果你能访问 `{baseDir}` → CLI 路径为 `{baseDir}/scripts/cli.py`（推荐，无需额外配置）
+2. 如果环境变量 `XUEXITONG_ROOT` 已设置 → CLI 路径为 `$XUEXITONG_ROOT/scripts/cli.py`
+3. 如果都不可用 → 询问用户：**"请告诉我 xuexitong 项目的根目录路径"**
 
-2. 如果未设置 → 询问用户：**"请告诉我 xuexitong 项目的根目录路径（就是包含 SKILL.md 的那个文件夹）"**
-
-3. 拿到路径后，后续所有命令统一使用该路径。例如：
-   - `python /home/xxx/xuexitong-skill/scripts/cli.py list-courses`
-   - `python C:\\Users\\xxx\\xuexitong-skill\\scripts\\cli.py list-courses`
+拿到路径后，后续所有命令统一使用该绝对路径。例如：
+- `python {baseDir}/scripts/cli.py list-courses`
+- `python /home/xxx/xuexitong-skill/scripts/cli.py list-courses`
 
 ## 第二步：验证运行环境
 

@@ -36,13 +36,23 @@ python scripts/bridge_server.py
 
 ### 5. 加载 skill 到 OpenClaw
 
-将整个项目克隆到本地后，设置环境变量：
+**推荐方式**（无需环境变量）：将整个项目目录复制到 OpenClaw 的 skills 目录：
+
+```bash
+# Linux / Mac
+cp -r xuexitong-skill ~/.openclaw/skills/xuexitong/
+
+# Windows (PowerShell)
+Copy-Item -Recurse xuexitong-skill $env:USERPROFILE\.openclaw\skills\xuexitong\
+```
+
+OpenClaw 会自动识别，AI 通过 `{baseDir}` 直接定位 scripts。
+
+**备选方式**（适合自定义路径）：设置环境变量后把 `SKILL.md` 放到任意 skills 目录：
 
 ```bash
 export XUEXITONG_ROOT=/你的路径/xuexitong-skill
 ```
-
-然后把 `SKILL.md` 放入 OpenClaw 的 skills 目录（或直接 symlink）。
 
 ## 目录
 

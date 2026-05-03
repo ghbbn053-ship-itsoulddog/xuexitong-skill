@@ -1,18 +1,14 @@
 {
   "name": "xuexitong",
-  "description": "超星学习通课程自动化助手——支持课程列表、章节导航、视频自动播放、整门课无人值守全自动刷完。CLI 输出统一为 JSON，可与任意 AI agent 编排。",
+  "description": "超星学习通课程自动化助手——课程列表、章节导航、视频自动播放、整门课无人值守全自动刷完",
   "version": "0.2.0",
   "author": "ghbbn053-ship-itsoulddog",
   "homepage": "https://github.com/ghbbn053-ship-itsoulddog/xuexitong-skill",
   "emoji": "🎓",
+  "tags": ["超星", "学习通", "自动化", "刷课", "chaoxing"],
+  "license": "MIT",
   "requires": {
-    "bins": ["python (>=3.13)"],
-    "env": ["XUEXITONG_ROOT"],
-    "services": [
-      "Chrome 浏览器 + XXT Bridge 扩展（已加载并连接）",
-      "bridge server (ws://localhost:9333)"
-    ]
-  },
-  "keywords": ["超星", "学习通", "自动化", "刷课", "chaoxing"],
-  "license": "MIT"
+    "bins": ["python"],
+    "env": ["XUEXITONG_ROOT"]
+  }
 }
