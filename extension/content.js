@@ -104,8 +104,9 @@ function frameEvaluate(selector, expression) {
   if (!frameDocument) {
     throw new Error(`iframe不可访问: ${selector}`);
   }
-  // CSP-safe: use indirect eval via <script> injection instead of new Function()
-  // which is blocked by the page's Content Security Policy (no unsafe-eval)
+  // new Function() is blocked by strict CSP (no unsafe-eval).
+  // If it throws, we tag the error with [CSP_BLOCKED] so background.js
+  // can detect it and fall back to chrome.debugger, which bypasses CSP.
   try {
     return new Function(
       "frameWindow",

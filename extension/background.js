@@ -216,13 +216,6 @@ async function cmdEvaluateViaDebugger(tabId, method, params) {
 async function cmdDom(method, params) {
   const tab = await getActiveTab();
 
-  // frame_evaluate operates inside iframes under the page's own CSP — the
-  // content script's new Function() will be blocked (no unsafe-eval).  Always
-  // route it through the debugger path, which bypasses CSP entirely.
-  if (method === "frame_evaluate") {
-    return await cmdDomViaDebugger(tab.id, method, params);
-  }
-
   try {
     const response = await chrome.tabs.sendMessage(tab.id, { method, params }, { frameId: 0 });
     if (response?.error) {

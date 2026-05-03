@@ -12,6 +12,7 @@ __pycache__/
 
 # Runtime
 scripts/.runtime_state.json
+scripts/.runtime_state.tmp
 *.log
 bridge_server.log
 bridge_server.err.log

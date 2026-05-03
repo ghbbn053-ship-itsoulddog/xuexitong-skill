@@ -40,7 +40,9 @@ def load_runtime_state() -> dict[str, Any]:
 
 
 def save_runtime_state(data: dict[str, Any]) -> None:
-    STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(STATE_FILE)  # atomic on POSIX; near-atomic on Windows
 
 
 def merge_runtime_state(**updates: Any) -> dict[str, Any]:
@@ -1324,12 +1326,17 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
             capture_context_from_study_page(page)
 
         # 处理当前章节的所有任务点
-        task_num = 0
+        # 续跑：如上次停在同一章节，从上次任务点继续，否则从 0 开始
+        rt_pre = load_runtime_state()
+        same_chapter = rt_pre.get("last_completed_chapter_id") == chapter_id
+        task_num = rt_pre.get("last_completed_task_num", 0) if same_chapter else 0
         max_tasks = 50
+        chapter_done = True  # assume complete：遇 break 才改 False
 
         while task_num < max_tasks:
             rt = load_runtime_state()
             if rt.get("pause_requested"):
+                chapter_done = False
                 break
 
             current_state = detect_page_state(page)
@@ -1338,6 +1345,7 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
                 context = capture_context_from_study_page(page)
                 card_src = context.get("cardIframeSrc")
                 if not card_src or card_src == "about:blank":
+                    chapter_done = False
                     break
                 cur_url = context.get("currentUrl") or ""
                 target_url = build_absolute_url(cur_url, card_src)
@@ -1350,6 +1358,7 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
             if current_state["page"] == "task_card":
                 rt = load_runtime_state()
                 if rt.get("pause_requested"):
+                    chapter_done = False
                     break
 
                 video_tasks = inspect_video_tasks(page)
@@ -1388,8 +1397,10 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
                                 time.sleep(1)
                                 capture_context_from_task_card(page)
                             except Exception:
+                                chapter_done = False
                                 break
                         else:
+                            chapter_done = False
                             break
                         continue
 
@@ -1437,14 +1448,22 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
                 continue
 
             # 不在预期页面，退出当前章节
+            chapter_done = False
             break
 
-        chapters_processed += 1
-        merge_runtime_state(
-            completed_chapters=rt.get("completed_chapters", []) + [chapter_id],
-            last_completed_chapter_id=chapter_id,
-            last_completed_task_num=0,
-        )
+        if chapter_done:
+            chapters_processed += 1
+            merge_runtime_state(
+                completed_chapters=rt.get("completed_chapters", []) + [chapter_id],
+                last_completed_chapter_id=chapter_id,
+                last_completed_task_num=0,
+            )
+        else:
+            # 非正常退出（pause / 错误 / about:blank）— 不标记完成，下次续跑同一章
+            merge_runtime_state(
+                last_completed_chapter_id=chapter_id,
+                last_completed_task_num=task_num,
+            )
         page.navigate(chapter_task_url)
         page.wait_for_load(20)
         time.sleep(2)
