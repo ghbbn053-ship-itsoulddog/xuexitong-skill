@@ -74,3 +74,16 @@ AI:   已完成 12/51 章，23 个视频，跳过 3 个测验
 用户: 先停一下
 AI:   已请求暂停，当前视频播完即停
 ```
+
+## ⚠️ 免责声明
+
+- 本项目**仅供学习研究**使用，严禁用于任何商业用途。
+- 使用者应自行承担使用本工具所产生的一切后果，开发者不对任何因使用本项目导致的账号封禁、数据丢失或法律纠纷负责。
+- 本项目不提供任何形式的自动登录、绕过验证或非法访问功能，所有操作依赖用户自行登录的合法会话。
+- 使用本工具前，请确认你已阅读并理解所在平台的使用协议。
+
+## ⭐
+
+如果这个项目帮到了你，给个 Star 支持一下吧——
+
+[![Star](https://img.shields.io/github/stars/ghbbn053-ship-itsoulddog/xuexitong-skill?style=social)](https://github.com/ghbbn053-ship-itsoulddog/xuexitong-skill)
