@@ -120,10 +120,20 @@ def parse_course_list_from_frame(page: BridgePage, frame_selector: str) -> list[
                 const teacher = teacherCandidates.length ? teacherCandidates[teacherCandidates.length - 1] : null;
                 const id = li.id || null;
                 const match = id ? id.match(/^course_(\\d+)_(\\d+)$/) : null;
+                let cpi = null, enc = null;
+                if (link && link.href) {
+                    try {
+                        const u = new URL(link.href);
+                        cpi = u.searchParams.get('cpi') || null;
+                        enc = u.searchParams.get('enc') || null;
+                    } catch(e) {}
+                }
                 return {
                   id,
                   courseId: match ? match[1] : null,
                   clazzId: match ? match[2] : null,
+                  cpi,
+                  enc,
                   title: clean(name ? name.textContent : null),
                   teacher,
                   href: link ? link.href : null
@@ -148,10 +158,20 @@ def parse_course_list(page: BridgePage) -> list[dict[str, Any]]:
                 const teacher = teacherCandidates.length ? teacherCandidates[teacherCandidates.length - 1] : null;
                 const id = li.id || null;
                 const match = id ? id.match(/^course_(\\d+)_(\\d+)$/) : null;
+                let cpi = null, enc = null;
+                if (link && link.href) {
+                    try {
+                        const u = new URL(link.href);
+                        cpi = u.searchParams.get('cpi') || null;
+                        enc = u.searchParams.get('enc') || null;
+                    } catch(e) {}
+                }
                 return {
                   id,
                   courseId: match ? match[1] : null,
                   clazzId: match ? match[2] : null,
+                  cpi,
+                  enc,
                   title: clean(name ? name.textContent : null),
                   teacher,
                   href: link ? link.href : null
@@ -2198,24 +2218,255 @@ def cmd_list_courses(page: BridgePage, _args: argparse.Namespace) -> None:
     )
 
 
-def cmd_get_progress(_page: BridgePage, args: argparse.Namespace) -> None:
-    print_json({
-        "ok": True,
-        "command": "get-progress",
-        "courseId": args.course_id,
-        "progress": None,
-        "note": "进度抓取逻辑待接入真实页面"
-    })
+def cmd_get_course_params(page: BridgePage, args: argparse.Namespace) -> None:
+    """获取课程完整参数 (courseId, clazzId, cpi, enc)。
+
+    优先级：runtime state > 当前页面解析 > 导航到课程详情页提取。
+    """
+    state = load_runtime_state()
+
+    # 1. 从 runtime state 查
+    if state.get("course_id") == args.course_id and state.get("clazz_id") and state.get("cpi"):
+        print_json(
+            {
+                "ok": True,
+                "command": "get-course-params",
+                "source": "runtime_state",
+                "courseId": state["course_id"],
+                "clazzId": state["clazz_id"],
+                "cpi": state["cpi"],
+                "enc": state.get("enc"),
+            }
+        )
+        return
+
+    # 2. 从当前页面课程列表解析
+    page_state = detect_page_state(page)
+    courses: list[dict[str, Any]] = []
+    if page_state["page"] == "space_wrapper":
+        courses = parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
+    elif page_state["page"] == "course_list":
+        courses = parse_course_list(page)
+
+    if courses:
+        target = next((c for c in courses if c.get("courseId") == args.course_id), None)
+        if target and target.get("clazzId"):
+            clazz_id = target["clazzId"]
+            cpi = target.get("cpi")
+            enc = target.get("enc")
+            if cpi:
+                merge_runtime_state(course_id=args.course_id, clazz_id=clazz_id, cpi=cpi, enc=enc)
+                print_json(
+                    {
+                        "ok": True,
+                        "command": "get-course-params",
+                        "source": "course_list",
+                        "courseId": args.course_id,
+                        "clazzId": clazz_id,
+                        "cpi": cpi,
+                        "enc": enc,
+                    }
+                )
+                return
+            # 有 clazzId 但没有 cpi → 导航到课程详情页提取
+            url = f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid={args.course_id}&clazzid={clazz_id}"
+            page.navigate(url)
+            page.wait_for_load(20)
+            time.sleep(2)
+            detail_state = detect_page_state(page)
+            cpi = read_hidden_value(page, selectors.COURSE_PAGE_CPI) or read_hidden_value(page, "#curcpi")
+            if cpi:
+                merge_runtime_state(course_id=args.course_id, clazz_id=clazz_id, cpi=cpi)
+                print_json(
+                    {
+                        "ok": True,
+                        "command": "get-course-params",
+                        "source": "course_detail_nav",
+                        "courseId": args.course_id,
+                        "clazzId": clazz_id,
+                        "cpi": cpi,
+                        "enc": enc,
+                        "pageState": detail_state,
+                    }
+                )
+                return
+
+    # 3. 如果 runtime state 有同课程的 clazz_id（但没有 cpi），直接导航提取 cpi
+    if state.get("course_id") == args.course_id and state.get("clazz_id"):
+        clazz_id = state["clazz_id"]
+        url = f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid={args.course_id}&clazzid={clazz_id}"
+        page.navigate(url)
+        page.wait_for_load(20)
+        time.sleep(2)
+        detail_state = detect_page_state(page)
+        cpi = read_hidden_value(page, selectors.COURSE_PAGE_CPI) or read_hidden_value(page, "#curcpi")
+        if cpi:
+            merge_runtime_state(course_id=args.course_id, clazz_id=clazz_id, cpi=cpi)
+            print_json(
+                {
+                    "ok": True,
+                    "command": "get-course-params",
+                    "source": "runtime_clazz_nav",
+                    "courseId": args.course_id,
+                    "clazzId": clazz_id,
+                    "cpi": cpi,
+                    "enc": state.get("enc"),
+                    "pageState": detail_state,
+                }
+            )
+            return
+
+    print_json(
+        {
+            "ok": False,
+            "command": "get-course-params",
+            "courseId": args.course_id,
+            "reason": "无法获取课程参数，请先执行 go-to-course-list 或在课程详情页执行此命令",
+            "pageState": page_state,
+        }
+    )
+
+
+def cmd_get_progress(page: BridgePage, args: argparse.Namespace) -> None:
+    """获取课程实时进度：完成任务点 / 总任务点、各章节状态。"""
+    state = detect_page_state(page)
+    rt = load_runtime_state()
+
+    # 如果不在 chapter_task 页，尝试导航过去
+    if state["page"] != "chapter_task":
+        course_id = args.course_id or rt.get("course_id")
+        # 仅当 runtime state 的 course_id 匹配时，才复用其 clazz_id / cpi
+        if course_id and rt.get("course_id") == course_id:
+            clazz_id = rt.get("clazz_id")
+            cpi = rt.get("cpi")
+        else:
+            clazz_id = None
+            cpi = None
+        if not all([course_id, clazz_id, cpi]):
+            print_json(
+                {
+                    "ok": False,
+                    "command": "get-progress",
+                    "courseId": args.course_id,
+                    "reason": "缺少课程参数，无法导航到章节页。请先执行 get-course-params",
+                    "pageState": state,
+                }
+            )
+            return
+        chapter_task_url = (
+            "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
+            f"?courseid={course_id}&clazzid={clazz_id}&cpi={cpi}&ut=s"
+        )
+        page.navigate(chapter_task_url)
+        page.wait_for_load(20)
+        time.sleep(2)
+        state = detect_page_state(page)
+
+    if state["page"] != "chapter_task":
+        print_json(
+            {
+                "ok": False,
+                "command": "get-progress",
+                "courseId": args.course_id,
+                "reason": "无法到达章节任务页",
+                "pageState": state,
+            }
+        )
+        return
+
+    wait_for_element(page, selectors.CHAPTER_PAGE_COURSETREE, timeout_s=12.0)
+    chapter_outline = parse_chapter_outline(page)
+    body_text = safe_get_element_text(page, selectors.CHAPTER_PAGE_PROGRESS_TEXT, retries=3, delay_s=0.2)
+    progress = parse_progress_from_text(body_text)
+
+    # 汇总各章节状态
+    chapters = []
+    for item in chapter_outline.get("items", []):
+        chapter_id = item.get("chapterId")
+        chapters.append(
+            {
+                "chapterId": chapter_id,
+                "title": item.get("title"),
+                "orderLabel": item.get("orderLabel"),
+                "unfinishedTaskPoints": item.get("unfinishedTaskPoints"),
+                "completed": chapter_id in rt.get("completed_chapters", []),
+            }
+        )
+
+    completed_chapter_ids = rt.get("completed_chapters", [])
+    print_json(
+        {
+            "ok": True,
+            "command": "get-progress",
+            "courseId": args.course_id or rt.get("course_id"),
+            "overallProgress": progress,
+            "completedChapters": len(completed_chapter_ids),
+            "totalChapters": chapter_outline.get("itemCount", 0),
+            "totalVideosWatched": rt.get("total_videos_watched", 0),
+            "blockedItems": rt.get("blocked_items", []),
+            "chapters": chapters[:20],
+        }
+    )
+
+
+def cmd_navigate(page: BridgePage, args: argparse.Namespace) -> None:
+    page.navigate(args.url)
+    page.wait_for_load(20)
+    time.sleep(1)
+    state = detect_page_state(page)
+    print_json(
+        {
+            "ok": True,
+            "command": "navigate",
+            "url": args.url,
+            "pageState": state,
+            "currentUrl": safe_get_url(page),
+        }
+    )
 
 
 def cmd_open_course(page: BridgePage, args: argparse.Namespace) -> None:
-    page.navigate(args.url)
-    print_json({
-        "ok": True,
-        "command": "open-course",
-        "courseId": args.course_id,
-        "url": args.url
-    })
+    clazz_id = args.clazz_id or load_runtime_state().get("clazz_id")
+    if not clazz_id:
+        print_json(
+            {
+                "ok": False,
+                "command": "open-course",
+                "courseId": args.course_id,
+                "reason": "缺少 clazz-id，请提供 --clazz-id 参数或先执行 run-course 缓存参数",
+            }
+        )
+        return
+
+    url = (
+        "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu"
+        f"?courseid={args.course_id}&clazzid={clazz_id}"
+    )
+    page.navigate(url)
+    page.wait_for_load(20)
+    time.sleep(1)
+    state = detect_page_state(page)
+
+    # 尝试从页面提取 cpi 并缓存到 runtime state
+    cpi = None
+    try:
+        cpi = read_hidden_value(page, selectors.COURSE_PAGE_CPI) or read_hidden_value(page, "#curcpi")
+        if cpi:
+            merge_runtime_state(course_id=args.course_id, clazz_id=clazz_id, cpi=cpi)
+    except Exception:
+        pass
+
+    print_json(
+        {
+            "ok": True,
+            "command": "open-course",
+            "courseId": args.course_id,
+            "clazzId": clazz_id,
+            "cpi": cpi,
+            "url": url,
+            "pageState": state,
+        }
+    )
 
 
 def cmd_open_person_space(page: BridgePage, _args: argparse.Namespace) -> None:
@@ -2291,6 +2542,79 @@ def cmd_follow_iframe(page: BridgePage, args: argparse.Namespace) -> None:
     )
 
 
+def cmd_go_to_course_list(page: BridgePage, _args: argparse.Namespace) -> None:
+    """一步到位：导航到课程列表并列出所有课程。合并 open-person-space + open-space-course + list-courses"""
+    state = detect_page_state(page)
+
+    # 如果已在 course_list，直接列课
+    if state["page"] == "course_list":
+        courses = parse_course_list(page)
+        print_json(
+            {
+                "ok": True,
+                "command": "go-to-course-list",
+                "source": "already_on_course_list",
+                "count": len(courses),
+                "courses": courses,
+            }
+        )
+        return
+
+    # 如果已在 space_wrapper，点击课程链接
+    if state["page"] == "space_wrapper":
+        if page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK):
+            page.click_element(selectors.SPACE_WRAPPER_COURSE_LINK)
+        page.wait_for_load(20)
+        time.sleep(2)
+
+    # 不在 space_wrapper → 先导航到个人空间
+    else:
+        if page.has_element(selectors.HOME_PERSON_SPACE_ENTRY):
+            page.click_element(selectors.HOME_PERSON_SPACE_ENTRY)
+        else:
+            page.navigate("https://i.chaoxing.com")
+        page.wait_for_load(20)
+        time.sleep(2)
+
+        # 在个人空间外壳页点击课程菜单
+        space_state = detect_page_state(page)
+        if space_state["page"] == "space_wrapper":
+            if page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK):
+                page.click_element(selectors.SPACE_WRAPPER_COURSE_LINK)
+                page.wait_for_load(20)
+                time.sleep(2)
+        elif space_state["page"] == "personal_space":
+            # 有些用户直接在 personal_space 页面
+            pass
+
+    # 最终尝试列课
+    final_state = detect_page_state(page)
+    if final_state["page"] in ("course_list", "space_wrapper"):
+        courses = (
+            parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
+            if final_state["page"] == "space_wrapper"
+            else parse_course_list(page)
+        )
+        print_json(
+            {
+                "ok": True,
+                "command": "go-to-course-list",
+                "source": final_state["page"],
+                "count": len(courses),
+                "courses": courses,
+            }
+        )
+    else:
+        print_json(
+            {
+                "ok": False,
+                "command": "go-to-course-list",
+                "reason": "无法到达课程列表页",
+                "pageState": final_state,
+            }
+        )
+
+
 def cmd_open_course_by_id(page: BridgePage, args: argparse.Namespace) -> None:
     state = detect_page_state(page)
     if state["page"] == "space_wrapper":
@@ -2355,6 +2679,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("check-login")
+    sub.add_parser("go-to-course-list")
     sub.add_parser("list-courses")
     sub.add_parser("open-person-space")
     sub.add_parser("open-space-course")
@@ -2378,12 +2703,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("request-pause")
     sub.add_parser("get-loop-status")
 
+    get_params = sub.add_parser("get-course-params")
+    get_params.add_argument("--course-id", required=True)
+
     progress = sub.add_parser("get-progress")
-    progress.add_argument("--course-id", required=True)
+    progress.add_argument("--course-id", default=None)
+
+    sub.add_parser("navigate").add_argument("--url", required=True)
 
     open_course = sub.add_parser("open-course")
     open_course.add_argument("--course-id", required=True)
-    open_course.add_argument("--url", required=True)
+    open_course.add_argument("--clazz-id", default=None)
 
     follow_iframe = sub.add_parser("follow-iframe")
     follow_iframe.add_argument("--selector", required=True)
@@ -2424,10 +2754,16 @@ def main() -> None:
     args = parser.parse_args()
     page = BridgePage()
 
-    if args.command == "check-login":
+    if args.command == "navigate":
+        cmd_navigate(page, args)
+    elif args.command == "check-login":
         cmd_check_login(page, args)
+    elif args.command == "go-to-course-list":
+        cmd_go_to_course_list(page, args)
     elif args.command == "list-courses":
         cmd_list_courses(page, args)
+    elif args.command == "get-course-params":
+        cmd_get_course_params(page, args)
     elif args.command == "get-progress":
         cmd_get_progress(page, args)
     elif args.command == "open-course":
