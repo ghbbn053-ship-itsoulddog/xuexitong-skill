@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Test
+.pytest_cache/
+
+# Runtime
+scripts/.runtime_state.json
+*.log
+bridge_server.log
+bridge_server.err.log
+
+# OS
+.DS_Store
+Thumbs.db

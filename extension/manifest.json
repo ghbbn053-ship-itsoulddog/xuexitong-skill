@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "XXT Bridge",
+  "version": "0.1.0",
+  "description": "学习模拟站自动化 Bridge",
+  "permissions": [
+    "tabs",
+    "cookies",
+    "scripting",
+    "alarms",
+    "debugger"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "https://localhost/*",
+    "ws://localhost/*",
+    "*://*.chaoxing.com/*",
+    "*://*.edu.cn/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.chaoxing.com/*",
+        "*://*.edu.cn/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}
