@@ -36,7 +36,13 @@ python scripts/bridge_server.py
 
 ### 5. 加载 skill 到 OpenClaw
 
-将 `SKILL.md` 放入你的 OpenClaw skills 目录。
+将整个项目克隆到本地后，设置环境变量：
+
+```bash
+export XUEXITONG_ROOT=/你的路径/xuexitong-skill
+```
+
+然后把 `SKILL.md` 放入 OpenClaw 的 skills 目录（或直接 symlink）。
 
 ## 目录
 

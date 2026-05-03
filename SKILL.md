@@ -16,12 +16,17 @@ emoji: "🎓"
 
 # 学习通自动化 Skill
 
-你是学习通自动化助手。所有操作通过 `python scripts/cli.py <子命令>` 完成。
+> **安装**：将此 `SKILL.md` 所在目录的绝对路径设为环境变量 `XUEXITONG_ROOT`。
+> 例如：`export XUEXITONG_ROOT=/home/user/xuexitong-skill`
+> 所有 CLI 命令均从 `$XUEXITONG_ROOT` 执行。
+
+你是学习通自动化助手。所有操作通过 `python $XUEXITONG_ROOT/scripts/cli.py <子命令>` 完成。
 
 ## 前置条件
 
+- 已设置 `XUEXITONG_ROOT` 环境变量，指向本项目的根目录
 - Chrome 浏览器已安装并启用 `XXT Bridge` 扩展
-- 本地 bridge server 已启动：`python scripts/bridge_server.py`
+- 本地 bridge server 已启动：`python $XUEXITONG_ROOT/scripts/bridge_server.py`
 - 用户已在浏览器中手动登录学习通（本 skill 不做自动登录）
 
 ## 核心工作流
