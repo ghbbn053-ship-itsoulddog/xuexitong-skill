@@ -20,10 +20,11 @@ from cli import (
 )
 
 
+# ⚠️ 使用前改为你自己的真实课程 URL
 DEFAULT_CHAPTER_TASK_URL = (
     "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
-    "?courseid=260762408&clazzid=141988491&cpi=425304304&ut=s"
-    "&t=1777803897810&stuenc=3840f7eac4e2823cf9e92954c814d164"
+    "?courseid=YOUR_COURSE_ID&clazzid=YOUR_CLAZZ_ID&cpi=YOUR_CPI&ut=s"
+    "&t=REPLACE_WITH_TIMESTAMP&stuenc=REPLACE_WITH_STUENC"
 )
 
 

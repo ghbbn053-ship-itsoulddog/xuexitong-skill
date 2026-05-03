@@ -100,7 +100,7 @@ study_page → next-chapter → 下一章
 AI:   [调用 list-courses] → 展示课程列表
 
 用户: 刷中华民族精神
-AI:   [调用 run-course --course-id 260762408 --clazz-id 141988491 --cpi 425304304]
+AI:   [调用 run-course --course-id ID --clazz-id ID --cpi ID]
       输出: 开始自动刷课，已完成 0/51 章
 
 用户: 现在进度多少

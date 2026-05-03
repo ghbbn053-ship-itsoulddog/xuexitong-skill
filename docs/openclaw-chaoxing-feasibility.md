@@ -220,8 +220,8 @@
 当前在“中华民族精神”页面上的实测结果：
 
 - 页面类型：`chapter_task`
-- `courseId`：`260762408`
-- `clazzId`：`141988491`
+- `courseId`：`YOUR_COURSE_ID`
+- `clazzId`：`YOUR_CLAZZ_ID`
 - 总进度：`0/98`
 - 一级单元数：`11`
 - 子章节数：`51`
