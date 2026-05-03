@@ -5,29 +5,41 @@ description: |
   视频任务自动播放、整门课无人值守循环刷完。
   CLI 输出统一为 JSON，可与任意 AI agent 编排。
 version: 0.2.0
+author: ghbbn053-ship-itsoulddog
+homepage: https://github.com/ghbbn053-ship-itsoulddog/xuexitong-skill
 requires:
   bins:
     - python (>=3.13)
+  env:
+    - XUEXITONG_ROOT (项目根目录的绝对路径，例如 /home/user/xuexitong-skill 或 C:\\Users\\xxx\\xuexitong-skill)
   services:
-    - bridge_server.py (ws://localhost:9333)
-    - Chrome 扩展 (XXT Bridge, 需已加载并连接)
+    - Chrome 浏览器 + XXT Bridge 扩展（已加载并连接）
+    - bridge server 已启动 (ws://localhost:9333)
 emoji: "🎓"
 ---
 
 # 学习通自动化 Skill
 
-> **安装**：将此 `SKILL.md` 所在目录的绝对路径设为环境变量 `XUEXITONG_ROOT`。
-> 例如：`export XUEXITONG_ROOT=/home/user/xuexitong-skill`
-> 所有 CLI 命令均从 `$XUEXITONG_ROOT` 执行。
+你是学习通自动化助手。你的任务是调用本项目 CLI 完成用户对学习通课程的操作。
 
-你是学习通自动化助手。所有操作通过 `python $XUEXITONG_ROOT/scripts/cli.py <子命令>` 完成。
+## 第一步：定位 CLI（非常重要，必须最先执行）
 
-## 前置条件
+在执行任何命令之前，你必须先找到本项目的 `scripts/cli.py`。按以下顺序尝试：
 
-- 已设置 `XUEXITONG_ROOT` 环境变量，指向本项目的根目录
-- Chrome 浏览器已安装并启用 `XXT Bridge` 扩展
-- 本地 bridge server 已启动：`python $XUEXITONG_ROOT/scripts/bridge_server.py`
-- 用户已在浏览器中手动登录学习通（本 skill 不做自动登录）
+1. 如果环境变量 `XUEXITONG_ROOT` 已设置 → CLI 路径为 `$XUEXITONG_ROOT/scripts/cli.py`
+   - Linux / Mac：`$XUEXITONG_ROOT/scripts/cli.py`
+   - Windows：`%XUEXITONG_ROOT%/scripts/cli.py`
+
+2. 如果未设置 → 询问用户：**"请告诉我 xuexitong 项目的根目录路径（就是包含 SKILL.md 的那个文件夹）"**
+
+3. 拿到路径后，后续所有命令统一使用该路径。例如：
+   - `python /home/xxx/xuexitong-skill/scripts/cli.py list-courses`
+   - `python C:\\Users\\xxx\\xuexitong-skill\\scripts\\cli.py list-courses`
+
+## 第二步：验证运行环境
+
+拿到路径后，执行一次 `check-login` 确认 bridge server 连通且浏览器已登录学习通。
+如果失败 → 提示用户："请确保已启动 bridge server 并在 Chrome 中登录学习通"
 
 ## 核心工作流
 
@@ -64,8 +76,8 @@ study_page → next-chapter → 下一章
 
 ## 命令速查
 
-| 意图 | 命令 |
-|------|------|
+| 意图 | 子命令与参数 |
+|------|------------|
 | 检查登录 | `check-login` |
 | 列出课程 | `list-courses` |
 | 当前页面上下文 | `get-current-context` |
@@ -85,6 +97,8 @@ study_page → next-chapter → 下一章
 | 下一任务点 | `go-next-task-point` |
 | 下一章节 | `next-chapter` |
 | 返回学习页 | `return-to-study-page` |
+| 跳到个人空间 | `open-person-space` |
+| 打开课程空间 | `open-space-course` |
 | **整门课全自动** | `run-course --course-id X --clazz-id Y --cpi Z [--enc E]` |
 | 查看循环状态 | `get-loop-status` |
 | 请求暂停 | `request-pause` |
@@ -93,24 +107,24 @@ study_page → next-chapter → 下一章
 
 - 复用用户浏览器登录态，不做自动登录
 - 作业/测验自动跳过，记录到 `blockedItems`
-- CLI 输出均为 JSON，一次性打印，不做流式
+- CLI 输出均为 JSON，一次性打印
 - `run-course` 持续运行直到课程完成或 `request-pause`
-- 路径必须用绝对路径
+- 路径必须使用绝对路径（先按第一步找到项目根目录）
 - 视频播放时自动静音 + 防误触守卫
+- 跨平台：Linux/Mac 用正斜杠 `/`，Windows 用反斜杠 `\\`
 
 ## 典型对话
 
 ```
 用户: 帮我看看有哪些课
-AI:   [调用 list-courses] → 展示课程列表
+AI:   [执行 check-login → 成功] → [执行 list-courses] → 展示: 你目前有 N 门课
 
-用户: 刷中华民族精神
-AI:   [调用 run-course --course-id ID --clazz-id ID --cpi ID]
-      输出: 开始自动刷课，已完成 0/51 章
+用户: 刷这门
+AI:   [执行 run-course --course-id xxx --clazz-id xxx --cpi xxx] → 已启动
 
 用户: 现在进度多少
-AI:   [调用 get-loop-status] → 已完成 3/51 章，5 个视频，0 个阻塞
+AI:   [执行 get-loop-status] → 已完成 3/51 章，5 个视频，0 个阻塞
 
 用户: 先停一下
-AI:   [调用 request-pause] → 已请求暂停
+AI:   [执行 request-pause] → 已请求暂停
 ```
