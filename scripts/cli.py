@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
+import subprocess
+import sys
 from pathlib import Path
 import re
 import time
@@ -2965,7 +2969,65 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _is_bridge_running(port: int = 9333, timeout: float = 0.3) -> bool:
+    """快速探测 bridge server 是否已在监听。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(("127.0.0.1", port))
+        s.close()
+        return True
+    except (ConnectionRefusedError, OSError, TimeoutError):
+        return False
+
+
+def _ensure_bridge(port: int = 9333, startup_wait: float = 3.0) -> None:
+    """确保 bridge server 在运行，未运行时自动启动。
+
+    零配置原则：用户无需手动启动 bridge server。
+    首次调用时 subprocess 后台拉起，后续调用检测到已运行则直接跳过。
+    """
+    if _is_bridge_running(port):
+        return
+
+    script_dir = Path(__file__).resolve().parent
+    bridge_py = script_dir / "bridge_server.py"
+    if not bridge_py.exists():
+        print_json(_make_response(
+            ok=False, command="_ensure_bridge",
+            error_code="BRIDGE_NOT_FOUND",
+            error_message=f"找不到 bridge_server.py: {bridge_py}",
+        ))
+        sys.exit(1)
+
+    # 后台启动，不弹黑窗
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+
+    subprocess.Popen([sys.executable, str(bridge_py), "--port", str(port)], **kwargs)
+
+    # 等待就绪
+    deadline = time.time() + startup_wait
+    while time.time() < deadline:
+        if _is_bridge_running(port):
+            return
+        time.sleep(0.15)
+
+    print_json(_make_response(
+        ok=False, command="_ensure_bridge",
+        error_code="BRIDGE_STARTUP_TIMEOUT",
+        error_message=f"Bridge server 启动超时 ({startup_wait}s) — 请手动执行 python scripts/bridge_server.py",
+    ))
+    sys.exit(1)
+
+
 def main() -> None:
+    _ensure_bridge()
     parser = build_parser()
     args = parser.parse_args()
     page = BridgePage()
