@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 import re
 import time
-from typing import Any
+import traceback
+from typing import Any, Callable
 
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -13,8 +14,41 @@ from xxt.bridge import BridgePage
 from xxt import selectors
 from xxt.page_state import detect_page_state
 
+# ── 超时配置 ──────────────────────────────────────────────
+COMMAND_TIMEOUT = 10  # 秒 — bridge 级超时，避免 OpenClaw SIGKILL
 
+# ── 统一输出 ──────────────────────────────────────────────
 STATE_FILE = Path(__file__).with_name(".runtime_state.json")
+
+
+def _now_ms(start: float) -> int:
+    return int((time.time() - start) * 1000)
+
+
+def _make_response(
+    ok: bool,
+    command: str,
+    data: Any | None = None,
+    state: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    allowed_actions: list[str] | None = None,
+    elapsed_ms: int = 0,
+) -> dict[str, Any]:
+    resp: dict[str, Any] = {"ok": ok, "command": command, "elapsedMs": elapsed_ms}
+    if state:
+        resp["state"] = state
+    if data is not None:
+        resp["data"] = data
+    if error_code:
+        resp["error"] = {"code": error_code, "message": error_message or ""}
+    if allowed_actions:
+        resp["allowedActions"] = allowed_actions
+    return resp
+
+
+def print_json(data: dict[str, Any]) -> None:
+    print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def build_absolute_url(current_url: str, src: str) -> str:
@@ -26,10 +60,6 @@ def build_absolute_url(current_url: str, src: str) -> str:
     return src
 
 
-def print_json(data: dict[str, Any]) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2))
-
-
 def load_runtime_state() -> dict[str, Any]:
     if not STATE_FILE.exists():
         return {}
@@ -37,6 +67,43 @@ def load_runtime_state() -> dict[str, Any]:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def timed_command(fn: Callable) -> Callable:
+    """装饰器：统一包装 CLI 命令。自动计时 + 统一输出格式 + 超时守卫。"""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(page: BridgePage, args: argparse.Namespace, command_name: str | None = None) -> None:
+        cmd = command_name or fn.__name__.replace("cmd_", "")
+        t0 = time.time()
+        try:
+            # patch page timeout to be short-lived
+            page._timeout = COMMAND_TIMEOUT
+            fn(page, args)
+        except Exception as exc:
+            msg = str(exc)
+            # Known timeout / bridge fail → give actionable error
+            if "timeout" in msg.lower() or "timed out" in msg.lower():
+                code = "BRIDGE_TIMEOUT"
+                msg = "Bridge 响应超时 — 请确认浏览器已打开目标页面"
+            elif "connection" in msg.lower() or "refused" in msg.lower():
+                code = "BRIDGE_DISCONNECTED"
+                msg = "Bridge 断开 — 请确认 bridge server 正在运行"
+            else:
+                code = "INTERNAL_ERROR"
+            print_json(
+                _make_response(
+                    ok=False,
+                    command=cmd,
+                    error_code=code,
+                    error_message=msg[:200],
+                    elapsed_ms=_now_ms(t0),
+                )
+            )
+        except SystemExit:
+            raise
+    return wrapper
 
 
 def save_runtime_state(data: dict[str, Any]) -> None:
@@ -1502,6 +1569,110 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
     )
 
 
+def allowed_actions_for_state(state: dict[str, Any]) -> list[str]:
+    """根据页面状态返回可执行的动作列表。
+    
+    注意: where-am-i 是元命令，始终可用但不列入返回值，避免 OpenClaw 自引用循环。
+    """
+    page = state.get("page", "unknown")
+    actions: dict[str, list[str]] = {
+        "login": ["navigate-to-chaoxing"],
+        "home_after_login": ["go-to-course-list"],
+        "personal_space": ["go-to-course-list"],
+        "space_wrapper": ["go-to-course-list", "list-courses", "list-courses-from-frame"],
+        "course_list": ["go-to-course-list", "list-courses", "open-course-by-id"],
+        "course_detail": [
+            "open-course",
+            "list-chapters",
+            "get-progress",
+            "run-course",
+        ],
+        "chapter_task": [
+            "list-chapters",
+            "get-chapter-summary",
+            "get-progress",
+            "get-current-context",
+            "open-chapter-by-id",
+            "auto-advance-step",
+            "run-course",
+        ],
+        "study_page": [
+            "auto-advance-step",
+            "go-next-task-point",
+            "next-chapter",
+            "return-to-study-page",
+            "wait-video-end",
+        ],
+        "task_card": [
+            "auto-advance-step",
+            "inspect-task-page",
+            "inspect-video-tasks",
+            "play-video-task",
+            "pause-video-task",
+            "set-video-rate",
+            "mute-video-task",
+            "arm-video-guard",
+            "get-video-playback-state",
+            "wait-video-end",
+        ],
+        "video_attachment": [
+            "get-video-playback-state",
+            "play-video-task",
+            "pause-video-task",
+            "set-video-rate",
+        ],
+        "unknown": ["navigate", "check-login"],
+    }
+    return actions.get(page, actions["unknown"])
+
+
+def cmd_where_am_i(page: BridgePage, _args: argparse.Namespace) -> None:
+    """纯 DOM 检测 — 0 导航，返回当前页面状态 + 可执行动作。
+
+    替代旧的 get-current-context，核心区别：
+    - 不导航、不等待、不触发页面加载
+    - 在 course_detail 页自动提取并缓存 courseId/clazzId/cpi
+    - 返回 allowedActions 告诉上层能做什么
+    """
+    t0 = time.time()
+    state = detect_page_state(page)
+    current_url = safe_get_url(page)
+    actions = allowed_actions_for_state(state)
+
+    data: dict[str, Any] = {
+        "currentUrl": current_url,
+        "pageState": state,
+        "allowedActions": actions,
+    }
+
+    # 在 course_detail 页自动缓存课程参数
+    if state["page"] == "course_detail":
+        try:
+            course_id = read_hidden_value(page, selectors.COURSE_PAGE_COURSE_ID)
+            clazz_id = read_hidden_value(page, selectors.COURSE_PAGE_CLASS_ID)
+            cpi = read_hidden_value(page, selectors.COURSE_PAGE_CPI)
+            if course_id and clazz_id:
+                from xxt.cache import set_cache as cache_set
+                params = {"courseId": course_id, "clazzId": clazz_id, "cpi": cpi}
+                cache_set("courseParams", params, source="where-am-i")
+                # 同步到 runtime state
+                merge_runtime_state(course_id=course_id, clazz_id=clazz_id, cpi=cpi)
+                data["cachedParams"] = params
+        except Exception:
+            pass
+
+    print_json(
+        _make_response(
+            ok=True,
+            command="where-am-i",
+            state=state["page"],
+            data=data,
+            allowed_actions=actions,
+            elapsed_ms=_now_ms(t0),
+        )
+    )
+
+
 def cmd_get_current_context(page: BridgePage, _args: argparse.Namespace) -> None:
     state = detect_page_state(page)
     data: dict[str, Any] = {
@@ -2181,205 +2352,291 @@ def cmd_check_login(page: BridgePage, _args: argparse.Namespace) -> None:
 
 
 def cmd_list_courses(page: BridgePage, _args: argparse.Namespace) -> None:
+    """课程列表 — 缓存优先 + frame-snapshot + 导航兜底。
+
+    三级回退：缓存命中 → frame 快照 → 导航到课程列表页。
+    """
+    t0 = time.time()
     state = detect_page_state(page)
+
+    # 1. 缓存命中
+    from xxt.cache import get_cached as cached, set_cache as cache_set
+    cached_courses = cached("courseList")
+    if cached_courses:
+        print_json(
+            _make_response(
+                ok=True,
+                command="list-courses",
+                state=state["page"],
+                data={"source": "cache", "count": len(cached_courses), "courses": cached_courses},
+                elapsed_ms=_now_ms(t0),
+            )
+        )
+        return
+
+    # 2. frame-snapshot from #frame_content (most reliable)
+    try:
+        snapshot = page.frame_snapshot("#frame_content")
+        if snapshot and isinstance(snapshot, dict) and snapshot.get("courseItems"):
+            courses = parse_course_list_from_frame(page, "#frame_content")
+            if courses:
+                cache_set("courseList", courses, source="frame_snapshot")
+                print_json(
+                    _make_response(
+                        ok=True,
+                        command="list-courses",
+                        state=state["page"],
+                        data={"source": "frame_snapshot", "count": len(courses), "courses": courses},
+                        elapsed_ms=_now_ms(t0),
+                    )
+                )
+                return
+    except Exception:
+        pass
+
+    # 3. 当前页面解析
     if state["page"] == "space_wrapper":
         courses = parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
-        print_json(
-            {
-                "ok": True,
-                "command": "list-courses",
-                "source": "space_wrapper_frame",
-                "count": len(courses),
-                "courses": courses,
-            }
-        )
-        return
-
-    if state["page"] != "course_list":
-        print_json(
-            {
-                "ok": False,
-                "command": "list-courses",
-                "reason": "当前页面不是课程列表页",
-                "pageState": state,
-            }
-        )
-        return
-
-    courses = parse_course_list(page)
-    print_json(
-        {
-            "ok": True,
-            "command": "list-courses",
-            "source": "top_document",
-            "count": len(courses),
-            "courses": courses,
-        }
-    )
-
-
-def cmd_get_course_params(page: BridgePage, args: argparse.Namespace) -> None:
-    """获取课程完整参数 (courseId, clazzId, cpi, enc)。
-
-    优先级：runtime state > 当前页面解析 > 导航到课程详情页提取。
-    """
-    state = load_runtime_state()
-
-    # 1. 从 runtime state 查
-    if state.get("course_id") == args.course_id and state.get("clazz_id") and state.get("cpi"):
-        print_json(
-            {
-                "ok": True,
-                "command": "get-course-params",
-                "source": "runtime_state",
-                "courseId": state["course_id"],
-                "clazzId": state["clazz_id"],
-                "cpi": state["cpi"],
-                "enc": state.get("enc"),
-            }
-        )
-        return
-
-    # 2. 从当前页面课程列表解析
-    page_state = detect_page_state(page)
-    courses: list[dict[str, Any]] = []
-    if page_state["page"] == "space_wrapper":
-        courses = parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
-    elif page_state["page"] == "course_list":
-        courses = parse_course_list(page)
-
-    if courses:
-        target = next((c for c in courses if c.get("courseId") == args.course_id), None)
-        if target and target.get("clazzId"):
-            clazz_id = target["clazzId"]
-            cpi = target.get("cpi")
-            enc = target.get("enc")
-            if cpi:
-                merge_runtime_state(course_id=args.course_id, clazz_id=clazz_id, cpi=cpi, enc=enc)
-                print_json(
-                    {
-                        "ok": True,
-                        "command": "get-course-params",
-                        "source": "course_list",
-                        "courseId": args.course_id,
-                        "clazzId": clazz_id,
-                        "cpi": cpi,
-                        "enc": enc,
-                    }
-                )
-                return
-            # 有 clazzId 但没有 cpi → 导航到课程详情页提取
-            url = f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid={args.course_id}&clazzid={clazz_id}"
-            page.navigate(url)
-            page.wait_for_load(20)
-            time.sleep(2)
-            detail_state = detect_page_state(page)
-            cpi = read_hidden_value(page, selectors.COURSE_PAGE_CPI) or read_hidden_value(page, "#curcpi")
-            if cpi:
-                merge_runtime_state(course_id=args.course_id, clazz_id=clazz_id, cpi=cpi)
-                print_json(
-                    {
-                        "ok": True,
-                        "command": "get-course-params",
-                        "source": "course_detail_nav",
-                        "courseId": args.course_id,
-                        "clazzId": clazz_id,
-                        "cpi": cpi,
-                        "enc": enc,
-                        "pageState": detail_state,
-                    }
-                )
-                return
-
-    # 3. 如果 runtime state 有同课程的 clazz_id（但没有 cpi），直接导航提取 cpi
-    if state.get("course_id") == args.course_id and state.get("clazz_id"):
-        clazz_id = state["clazz_id"]
-        url = f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid={args.course_id}&clazzid={clazz_id}"
-        page.navigate(url)
-        page.wait_for_load(20)
-        time.sleep(2)
-        detail_state = detect_page_state(page)
-        cpi = read_hidden_value(page, selectors.COURSE_PAGE_CPI) or read_hidden_value(page, "#curcpi")
-        if cpi:
-            merge_runtime_state(course_id=args.course_id, clazz_id=clazz_id, cpi=cpi)
+        if courses:
+            cache_set("courseList", courses, source="space_wrapper_frame")
             print_json(
-                {
-                    "ok": True,
-                    "command": "get-course-params",
-                    "source": "runtime_clazz_nav",
-                    "courseId": args.course_id,
-                    "clazzId": clazz_id,
-                    "cpi": cpi,
-                    "enc": state.get("enc"),
-                    "pageState": detail_state,
-                }
+                _make_response(
+                    ok=True,
+                    command="list-courses",
+                    state=state["page"],
+                    data={"source": "space_wrapper_frame", "count": len(courses), "courses": courses},
+                    elapsed_ms=_now_ms(t0),
+                )
+            )
+            return
+    elif state["page"] == "course_list":
+        courses = parse_course_list(page)
+        if courses:
+            cache_set("courseList", courses, source="top_document")
+            print_json(
+                _make_response(
+                    ok=True,
+                    command="list-courses",
+                    state=state["page"],
+                    data={"source": "top_document", "count": len(courses), "courses": courses},
+                    elapsed_ms=_now_ms(t0),
+                )
+            )
+            return
+
+    # 4. 导航兜底
+    if page.has_element(selectors.HOME_PERSON_SPACE_ENTRY):
+        page.click_element(selectors.HOME_PERSON_SPACE_ENTRY)
+    else:
+        page.navigate("https://i.chaoxing.com")
+    page.wait_for_load(10)
+    time.sleep(1)
+
+    nav_state = detect_page_state(page)
+    if nav_state["page"] == "space_wrapper":
+        if page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK):
+            page.click_element(selectors.SPACE_WRAPPER_COURSE_LINK)
+        page.wait_for_load(10)
+        time.sleep(1)
+
+    final_state = detect_page_state(page)
+    if final_state["page"] in ("course_list", "space_wrapper"):
+        courses = (
+            parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
+            if final_state["page"] == "space_wrapper"
+            else parse_course_list(page)
+        )
+        if courses:
+            cache_set("courseList", courses, source="navigation_fallback")
+            print_json(
+                _make_response(
+                    ok=True,
+                    command="list-courses",
+                    state=final_state["page"],
+                    data={"source": "navigation_fallback", "count": len(courses), "courses": courses},
+                    elapsed_ms=_now_ms(t0),
+                )
             )
             return
 
     print_json(
-        {
-            "ok": False,
-            "command": "get-course-params",
-            "courseId": args.course_id,
-            "reason": "无法获取课程参数，请先执行 go-to-course-list 或在课程详情页执行此命令",
-            "pageState": page_state,
-        }
+        _make_response(
+            ok=False,
+            command="list-courses",
+            state=state["page"],
+            error_code="COURSE_LIST_UNAVAILABLE",
+            error_message="无法获取课程列表 — 请执行 where-am-i 确认当前状态",
+            elapsed_ms=_now_ms(t0),
+        )
     )
+
+
+def cmd_list_courses_from_frame(page: BridgePage, args: argparse.Namespace) -> None:
+    """直接从指定 iframe 抓取课程列表，不依赖页面状态。"""
+    t0 = time.time()
+    selector = args.selector
+    state = detect_page_state(page)
+
+    from xxt.cache import set_cache as cache_set
+    try:
+        courses = parse_course_list_from_frame(page, selector)
+        if not courses:
+            raise RuntimeError("iframe 中未找到课程列表")
+        cache_set("courseList", courses, source="frame_snapshot")
+        print_json(
+            _make_response(
+                ok=True,
+                command="list-courses-from-frame",
+                state=state["page"],
+                data={"selector": selector, "count": len(courses), "courses": courses},
+                elapsed_ms=_now_ms(t0),
+            )
+        )
+    except Exception as exc:
+        print_json(
+            _make_response(
+                ok=False,
+                command="list-courses-from-frame",
+                state=state["page"],
+                error_code="FRAME_SNAPSHOT_FAILED",
+                error_message=str(exc)[:200],
+                elapsed_ms=_now_ms(t0),
+            )
+        )
 
 
 def cmd_get_progress(page: BridgePage, args: argparse.Namespace) -> None:
-    """获取课程实时进度：完成任务点 / 总任务点、各章节状态。"""
+    """获取课程进度 — 缓存优先 + runtime_state 融合。
+
+    四级回退：缓存命中 → 当前页 DOM → 导航到章节页 → runtime_state 部分数据。
+    """
+    t0 = time.time()
     state = detect_page_state(page)
     rt = load_runtime_state()
 
-    # 如果不在 chapter_task 页，尝试导航过去
-    if state["page"] != "chapter_task":
-        course_id = args.course_id or rt.get("course_id")
-        # 仅当 runtime state 的 course_id 匹配时，才复用其 clazz_id / cpi
-        if course_id and rt.get("course_id") == course_id:
-            clazz_id = rt.get("clazz_id")
-            cpi = rt.get("cpi")
-        else:
-            clazz_id = None
-            cpi = None
-        if not all([course_id, clazz_id, cpi]):
-            print_json(
-                {
-                    "ok": False,
-                    "command": "get-progress",
-                    "courseId": args.course_id,
-                    "reason": "缺少课程参数，无法导航到章节页。请先执行 get-course-params",
-                    "pageState": state,
-                }
-            )
-            return
-        chapter_task_url = (
-            "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
-            f"?courseid={course_id}&clazzid={clazz_id}&cpi={cpi}&ut=s"
-        )
-        page.navigate(chapter_task_url)
-        page.wait_for_load(20)
-        time.sleep(2)
-        state = detect_page_state(page)
+    from xxt.cache import get_cached as cached, set_cache as cache_set, get_cached_course_params
 
-    if state["page"] != "chapter_task":
+    # 1. 缓存命中 — 直接返回上次进度
+    cached_progress = cached("lastProgress")
+    if cached_progress and isinstance(cached_progress, dict):
         print_json(
-            {
-                "ok": False,
-                "command": "get-progress",
-                "courseId": args.course_id,
-                "reason": "无法到达章节任务页",
-                "pageState": state,
-            }
+            _make_response(
+                ok=True,
+                command="get-progress",
+                state=state["page"],
+                data={**cached_progress, "source": "cache"},
+                elapsed_ms=_now_ms(t0),
+            )
         )
         return
 
-    wait_for_element(page, selectors.CHAPTER_PAGE_COURSETREE, timeout_s=12.0)
-    chapter_outline = parse_chapter_outline(page)
-    body_text = safe_get_element_text(page, selectors.CHAPTER_PAGE_PROGRESS_TEXT, retries=3, delay_s=0.2)
-    progress = parse_progress_from_text(body_text)
+    # 2. 已在 chapter_task 页 — 直接读 DOM
+    if state["page"] == "chapter_task":
+        wait_for_element(page, selectors.CHAPTER_PAGE_COURSETREE, timeout_s=8.0)
+        chapter_outline = parse_chapter_outline(page)
+        body_text = safe_get_element_text(page, selectors.CHAPTER_PAGE_PROGRESS_TEXT, retries=2, delay_s=0.2)
+        progress = parse_progress_from_text(body_text)
+        chapters = _build_chapter_list(chapter_outline, rt)
+        completed_ids = rt.get("completed_chapters", [])
+        data = {
+            "source": "page_dom",
+            "overallProgress": progress,
+            "completedChapters": len(completed_ids),
+            "totalChapters": chapter_outline.get("itemCount", 0),
+            "totalVideosWatched": rt.get("total_videos_watched", 0),
+            "blockedItems": rt.get("blocked_items", []),
+            "chapters": chapters[:20],
+        }
+        cache_set("lastProgress", data, source="page_dom")
+        print_json(
+            _make_response(
+                ok=True,
+                command="get-progress",
+                state=state["page"],
+                data=data,
+                elapsed_ms=_now_ms(t0),
+            )
+        )
+        return
 
-    # 汇总各章节状态
+    # 3. 不在 chapter_task → 尝试导航
+    params = get_cached_course_params()
+    course_id = args.course_id or params.get("courseId") if params else None or rt.get("course_id")
+    if course_id:
+        clazz_id = params.get("clazzId") if params and params.get("clazzId") else rt.get("clazz_id")
+        cpi = params.get("cpi") if params else rt.get("cpi")
+        if all([course_id, clazz_id, cpi]):
+            chapter_task_url = (
+                "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
+                f"?courseid={course_id}&clazzid={clazz_id}&cpi={cpi}&ut=s"
+            )
+            page.navigate(chapter_task_url)
+            page.wait_for_load(10)
+            time.sleep(2)
+            nav_state = detect_page_state(page)
+            if nav_state["page"] == "chapter_task":
+                wait_for_element(page, selectors.CHAPTER_PAGE_COURSETREE, timeout_s=8.0)
+                chapter_outline = parse_chapter_outline(page)
+                body_text = safe_get_element_text(page, selectors.CHAPTER_PAGE_PROGRESS_TEXT, retries=2, delay_s=0.2)
+                progress = parse_progress_from_text(body_text)
+                chapters = _build_chapter_list(chapter_outline, rt)
+                completed_ids = rt.get("completed_chapters", [])
+                data = {
+                    "source": "navigation",
+                    "overallProgress": progress,
+                    "completedChapters": len(completed_ids),
+                    "totalChapters": chapter_outline.get("itemCount", 0),
+                    "totalVideosWatched": rt.get("total_videos_watched", 0),
+                    "blockedItems": rt.get("blocked_items", []),
+                    "chapters": chapters[:20],
+                }
+                cache_set("lastProgress", data, source="navigation")
+                print_json(
+                    _make_response(
+                        ok=True,
+                        command="get-progress",
+                        state=nav_state["page"],
+                        data=data,
+                        elapsed_ms=_now_ms(t0),
+                    )
+                )
+                return
+
+    # 4. runtime_state 部分数据兜底
+    completed_ids = rt.get("completed_chapters", [])
+    if completed_ids or rt.get("total_videos_watched"):
+        data = {
+            "source": "runtime_state",
+            "completedChapters": len(completed_ids),
+            "totalVideosWatched": rt.get("total_videos_watched", 0),
+            "blockedItems": rt.get("blocked_items", []),
+            "note": "未连接页面，仅返回 runtime state 缓存数据"
+        }
+        print_json(
+            _make_response(
+                ok=True,
+                command="get-progress",
+                state=state["page"],
+                data=data,
+                elapsed_ms=_now_ms(t0),
+            )
+        )
+        return
+
+    # 5. 完全无数据
+    print_json(
+        _make_response(
+            ok=False,
+            command="get-progress",
+            state=state["page"],
+            error_code="NO_PROGRESS_DATA",
+            error_message="无进度数据，请先执行 where-am-i 确认状态，再执行 run-course 或导航到章节页",
+            elapsed_ms=_now_ms(t0),
+        )
+    )
+
+
+def _build_chapter_list(chapter_outline: dict[str, Any], rt: dict[str, Any]) -> list[dict[str, Any]]:
     chapters = []
     for item in chapter_outline.get("items", []):
         chapter_id = item.get("chapterId")
@@ -2392,21 +2649,7 @@ def cmd_get_progress(page: BridgePage, args: argparse.Namespace) -> None:
                 "completed": chapter_id in rt.get("completed_chapters", []),
             }
         )
-
-    completed_chapter_ids = rt.get("completed_chapters", [])
-    print_json(
-        {
-            "ok": True,
-            "command": "get-progress",
-            "courseId": args.course_id or rt.get("course_id"),
-            "overallProgress": progress,
-            "completedChapters": len(completed_chapter_ids),
-            "totalChapters": chapter_outline.get("itemCount", 0),
-            "totalVideosWatched": rt.get("total_videos_watched", 0),
-            "blockedItems": rt.get("blocked_items", []),
-            "chapters": chapters[:20],
-        }
-    )
+    return chapters
 
 
 def cmd_navigate(page: BridgePage, args: argparse.Namespace) -> None:
@@ -2426,6 +2669,22 @@ def cmd_navigate(page: BridgePage, args: argparse.Namespace) -> None:
 
 
 def cmd_open_course(page: BridgePage, args: argparse.Namespace) -> None:
+    # 如果提供了 --url，直接导航（向后兼容）
+    if args.url:
+        page.navigate(args.url)
+        page.wait_for_load(20)
+        time.sleep(1)
+        state = detect_page_state(page)
+        print_json(
+            _make_response(
+                ok=True,
+                command="open-course",
+                state=state["page"],
+                data={"courseId": args.course_id, "url": args.url},
+            )
+        )
+        return
+
     clazz_id = args.clazz_id or load_runtime_state().get("clazz_id")
     if not clazz_id:
         print_json(
@@ -2465,47 +2724,6 @@ def cmd_open_course(page: BridgePage, args: argparse.Namespace) -> None:
             "cpi": cpi,
             "url": url,
             "pageState": state,
-        }
-    )
-
-
-def cmd_open_person_space(page: BridgePage, _args: argparse.Namespace) -> None:
-    if page.has_element(selectors.HOME_PERSON_SPACE_ENTRY):
-        page.click_element(selectors.HOME_PERSON_SPACE_ENTRY)
-    else:
-        page.navigate("https://i.chaoxing.com")
-    print_json(
-        {
-            "ok": True,
-            "command": "open-person-space",
-            "status": "sent",
-        }
-    )
-
-
-def cmd_open_space_course(page: BridgePage, _args: argparse.Namespace) -> None:
-    state = detect_page_state(page)
-    if state["page"] != "space_wrapper":
-        print_json(
-            {
-                "ok": False,
-                "command": "open-space-course",
-                "reason": "当前页面不是个人空间课程外壳页",
-                "pageState": state,
-            }
-        )
-        return
-
-    if page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK):
-        page.click_element(selectors.SPACE_WRAPPER_COURSE_LINK)
-
-    frame_src = read_frame_src(page, selectors.SPACE_WRAPPER_FRAME)
-
-    print_json(
-        {
-            "ok": True,
-            "command": "open-space-course",
-            "frameSrc": frame_src,
         }
     )
 
@@ -2679,10 +2897,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("check-login")
+    sub.add_parser("where-am-i")
     sub.add_parser("go-to-course-list")
     sub.add_parser("list-courses")
-    sub.add_parser("open-person-space")
-    sub.add_parser("open-space-course")
+    sub.add_parser("list-courses-from-frame").add_argument("--selector", required=True)
     sub.add_parser("get-current-context")
     sub.add_parser("get-chapter-summary")
     sub.add_parser("list-chapters")
@@ -2703,9 +2921,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("request-pause")
     sub.add_parser("get-loop-status")
 
-    get_params = sub.add_parser("get-course-params")
-    get_params.add_argument("--course-id", required=True)
-
     progress = sub.add_parser("get-progress")
     progress.add_argument("--course-id", default=None)
 
@@ -2714,6 +2929,7 @@ def build_parser() -> argparse.ArgumentParser:
     open_course = sub.add_parser("open-course")
     open_course.add_argument("--course-id", required=True)
     open_course.add_argument("--clazz-id", default=None)
+    open_course.add_argument("--url", default=None)
 
     follow_iframe = sub.add_parser("follow-iframe")
     follow_iframe.add_argument("--selector", required=True)
@@ -2758,20 +2974,18 @@ def main() -> None:
         cmd_navigate(page, args)
     elif args.command == "check-login":
         cmd_check_login(page, args)
+    elif args.command == "where-am-i":
+        cmd_where_am_i(page, args)
     elif args.command == "go-to-course-list":
         cmd_go_to_course_list(page, args)
     elif args.command == "list-courses":
         cmd_list_courses(page, args)
-    elif args.command == "get-course-params":
-        cmd_get_course_params(page, args)
+    elif args.command == "list-courses-from-frame":
+        cmd_list_courses_from_frame(page, args)
     elif args.command == "get-progress":
         cmd_get_progress(page, args)
     elif args.command == "open-course":
         cmd_open_course(page, args)
-    elif args.command == "open-person-space":
-        cmd_open_person_space(page, args)
-    elif args.command == "open-space-course":
-        cmd_open_space_course(page, args)
     elif args.command == "get-current-context":
         cmd_get_current_context(page, args)
     elif args.command == "get-chapter-summary":

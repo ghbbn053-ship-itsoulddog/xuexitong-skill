@@ -5,8 +5,11 @@ from typing import Any
 
 
 class BridgePage:
+    DEFAULT_TIMEOUT = 10  # seconds — short timeout avoids OpenClaw SIGKILL
+
     def __init__(self, bridge_url: str = "ws://localhost:9333") -> None:
         self._bridge_url = bridge_url
+        self._timeout = self.DEFAULT_TIMEOUT
 
     def _call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         import websockets.sync.client as ws_client
@@ -17,7 +20,7 @@ class BridgePage:
 
         with ws_client.connect(self._bridge_url, max_size=20 * 1024 * 1024) as ws:
             ws.send(json.dumps(msg, ensure_ascii=False))
-            raw = ws.recv(timeout=60)
+            raw = ws.recv(timeout=self._timeout)
 
         resp = json.loads(raw)
         if resp.get("error"):
