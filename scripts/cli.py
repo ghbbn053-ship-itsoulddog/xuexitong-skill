@@ -79,7 +79,7 @@ def timed_command(fn: Callable) -> Callable:
 
     @functools.wraps(fn)
     def wrapper(page: BridgePage, args: argparse.Namespace, command_name: str | None = None) -> None:
-        cmd = command_name or fn.__name__.replace("cmd_", "")
+        cmd = command_name or fn.__name__.replace("cmd_", "").replace("_", "-")
         t0 = time.time()
         try:
             # patch page timeout to be short-lived
@@ -2789,36 +2789,34 @@ def cmd_go_to_course_list(page: BridgePage, _args: argparse.Namespace) -> None:
         )
         return
 
-    # 2. 已在 course_list / space_wrapper → 直接解析
+    # 2. 已在 course_list / space_wrapper → 直接解析（含空列表）
     if state["page"] == "course_list":
         courses = parse_course_list(page)
-        if courses:
-            cache_set("courseList", courses, source="course_list_page")
-            print_json(
-                _make_response(
-                    ok=True,
-                    command="go-to-course-list",
-                    state=state["page"],
-                    data={"source": "course_list_page", "count": len(courses), "courses": courses},
-                    elapsed_ms=_now_ms(t0),
-                )
+        cache_set("courseList", courses, source="course_list_page")
+        print_json(
+            _make_response(
+                ok=True,
+                command="go-to-course-list",
+                state=state["page"],
+                data={"source": "course_list_page", "count": len(courses), "courses": courses},
+                elapsed_ms=_now_ms(t0),
             )
-            return
+        )
+        return
 
     if state["page"] == "space_wrapper":
         courses = parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
-        if courses:
-            cache_set("courseList", courses, source="space_wrapper_frame")
-            print_json(
-                _make_response(
-                    ok=True,
-                    command="go-to-course-list",
-                    state=state["page"],
-                    data={"source": "space_wrapper_frame", "count": len(courses), "courses": courses},
-                    elapsed_ms=_now_ms(t0),
-                )
+        cache_set("courseList", courses, source="space_wrapper_frame")
+        print_json(
+            _make_response(
+                ok=True,
+                command="go-to-course-list",
+                state=state["page"],
+                data={"source": "space_wrapper_frame", "count": len(courses), "courses": courses},
+                elapsed_ms=_now_ms(t0),
             )
-            return
+        )
+        return
 
     # 3. 不在目标页 → 单次导航到个人空间
     if page.has_element(selectors.HOME_PERSON_SPACE_ENTRY):
@@ -2829,8 +2827,12 @@ def cmd_go_to_course_list(page: BridgePage, _args: argparse.Namespace) -> None:
     time.sleep(1)
 
     nav_state = detect_page_state(page)
-    if nav_state["page"] == "space_wrapper":
-        courses = parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
+    if nav_state["page"] in ("space_wrapper", "course_list"):
+        courses = (
+            parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
+            if nav_state["page"] == "space_wrapper"
+            else parse_course_list(page)
+        )
         if courses:
             cache_set("courseList", courses, source="navigation")
             print_json(
@@ -2844,8 +2846,7 @@ def cmd_go_to_course_list(page: BridgePage, _args: argparse.Namespace) -> None:
             )
             return
 
-    # 4. 失败
-    actions = allowed_actions_for_state(nav_state)
+    # 4. 失败 — 不返回 allowedActions，避免自引用循环
     print_json(
         _make_response(
             ok=False,
@@ -2853,7 +2854,6 @@ def cmd_go_to_course_list(page: BridgePage, _args: argparse.Namespace) -> None:
             state=nav_state["page"],
             error_code="COURSE_LIST_UNAVAILABLE",
             error_message="无法获取课程列表 — 请确认已登录学习通并执行 where-am-i",
-            allowed_actions=actions,
             elapsed_ms=_now_ms(t0),
         )
     )
@@ -3049,9 +3049,9 @@ def _ensure_bridge(port: int = 9333, startup_wait: float = 3.0) -> None:
 
 
 def main() -> None:
-    _ensure_bridge()
     parser = build_parser()
     args = parser.parse_args()
+    _ensure_bridge()
     page = BridgePage()
 
     if args.command == "navigate":
