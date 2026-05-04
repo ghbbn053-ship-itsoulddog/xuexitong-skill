@@ -1298,6 +1298,25 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
     enc = getattr(args, "enc", None) or None
     max_chapters = getattr(args, "max_chapters", 999) or 999
 
+    # 导航操作可能较慢，放宽 bridge 超时
+    _saved_timeout = page._timeout
+    page._timeout = 30
+
+    try:
+        _run_course_loop(page, course_id, clazz_id, cpi, enc, max_chapters)
+    finally:
+        page._timeout = _saved_timeout
+
+
+def _run_course_loop(
+    page: BridgePage,
+    course_id: str,
+    clazz_id: str,
+    cpi: str,
+    enc: str | None,
+    max_chapters: int,
+) -> None:
+
     # --- 进度持久化：同名课程续跑，换课程重置 ---
     existing = load_runtime_state()
     same_course = (
@@ -1318,7 +1337,10 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
         )
         if last_chapter_id:
             resume_msg += f"，上次停在章节 {last_chapter_id} 任务点 {last_task_num}"
-        print_json({"ok": True, "command": "run-course", "action": "resuming", "detail": resume_msg})
+        print_json(_make_response(
+            ok=True, command="run-course",
+            data={"action": "resuming", "detail": resume_msg},
+        ))
     else:
         completed_chapters = []
         blocked_items = []
@@ -1353,14 +1375,10 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
     while chapters_processed < max_chapters:
         rt = load_runtime_state()
         if rt.get("pause_requested"):
-            print_json(
-                {
-                    "ok": True,
-                    "command": "run-course",
-                    "action": "paused",
-                    "chaptersProcessed": chapters_processed,
-                }
-            )
+            print_json(_make_response(
+                ok=True, command="run-course",
+                data={"action": "paused", "chaptersProcessed": chapters_processed},
+            ))
             return
 
         # 确保在章节任务页
@@ -1371,14 +1389,12 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
             time.sleep(2)
             state = detect_page_state(page)
             if state["page"] != "chapter_task":
-                print_json(
-                    {
-                        "ok": False,
-                        "command": "run-course",
-                        "error": "无法到达章节任务页",
-                        "chaptersProcessed": chapters_processed,
-                    }
-                )
+                print_json(_make_response(
+                    ok=False, command="run-course",
+                    error_code="NAVIGATION_FAILED",
+                    error_message="无法到达章节任务页",
+                    data={"chaptersProcessed": chapters_processed},
+                ))
                 return
 
         wait_for_element(page, selectors.CHAPTER_PAGE_COURSETREE, timeout_s=12.0)
@@ -1395,14 +1411,10 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
         )
 
         if not next_chapter:
-            print_json(
-                {
-                    "ok": True,
-                    "command": "run-course",
-                    "action": "course_complete",
-                    "chaptersProcessed": chapters_processed,
-                }
-            )
+            print_json(_make_response(
+                ok=True, command="run-course",
+                data={"action": "course_complete", "chaptersProcessed": chapters_processed},
+            ))
             return
 
         chapter_id = next_chapter["chapterId"]
@@ -1560,17 +1572,16 @@ def cmd_run_course(page: BridgePage, args: argparse.Namespace) -> None:
         time.sleep(2)
 
     final_rt = load_runtime_state()
-    print_json(
-        {
-            "ok": True,
-            "command": "run-course",
+    print_json(_make_response(
+        ok=True, command="run-course",
+        data={
             "action": "finished",
             "chaptersProcessed": chapters_processed,
             "totalVideosWatched": final_rt.get("total_videos_watched", 0),
             "blockedItems": final_rt.get("blocked_items", []),
             "completedChapters": final_rt.get("completed_chapters", []),
-        }
-    )
+        },
+    ))
 
 
 def allowed_actions_for_state(state: dict[str, Any]) -> list[str]:
