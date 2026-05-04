@@ -2764,77 +2764,99 @@ def cmd_follow_iframe(page: BridgePage, args: argparse.Namespace) -> None:
     )
 
 
+@timed_command
 def cmd_go_to_course_list(page: BridgePage, _args: argparse.Namespace) -> None:
-    """一步到位：导航到课程列表并列出所有课程。合并 open-person-space + open-space-course + list-courses"""
+    """一步获取课程列表 — 缓存优先 + 单次导航，1-12s 返回。
+
+    与旧版的区别：不再串行两次 click+wait，直接导航到个人空间从 iframe 解析。
+    """
+    t0 = time.time()
     state = detect_page_state(page)
 
-    # 如果已在 course_list，直接列课
-    if state["page"] == "course_list":
-        courses = parse_course_list(page)
+    from xxt.cache import get_cached as cached, set_cache as cache_set
+
+    # 1. 缓存命中 — 最快路径
+    cached_courses = cached("courseList")
+    if cached_courses:
         print_json(
-            {
-                "ok": True,
-                "command": "go-to-course-list",
-                "source": "already_on_course_list",
-                "count": len(courses),
-                "courses": courses,
-            }
+            _make_response(
+                ok=True,
+                command="go-to-course-list",
+                state=state["page"],
+                data={"source": "cache", "count": len(cached_courses), "courses": cached_courses},
+                elapsed_ms=_now_ms(t0),
+            )
         )
         return
 
-    # 如果已在 space_wrapper，点击课程链接
+    # 2. 已在 course_list / space_wrapper → 直接解析
+    if state["page"] == "course_list":
+        courses = parse_course_list(page)
+        if courses:
+            cache_set("courseList", courses, source="course_list_page")
+            print_json(
+                _make_response(
+                    ok=True,
+                    command="go-to-course-list",
+                    state=state["page"],
+                    data={"source": "course_list_page", "count": len(courses), "courses": courses},
+                    elapsed_ms=_now_ms(t0),
+                )
+            )
+            return
+
     if state["page"] == "space_wrapper":
-        if page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK):
-            page.click_element(selectors.SPACE_WRAPPER_COURSE_LINK)
-        page.wait_for_load(20)
-        time.sleep(2)
+        courses = parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
+        if courses:
+            cache_set("courseList", courses, source="space_wrapper_frame")
+            print_json(
+                _make_response(
+                    ok=True,
+                    command="go-to-course-list",
+                    state=state["page"],
+                    data={"source": "space_wrapper_frame", "count": len(courses), "courses": courses},
+                    elapsed_ms=_now_ms(t0),
+                )
+            )
+            return
 
-    # 不在 space_wrapper → 先导航到个人空间
+    # 3. 不在目标页 → 单次导航到个人空间
+    if page.has_element(selectors.HOME_PERSON_SPACE_ENTRY):
+        page.click_element(selectors.HOME_PERSON_SPACE_ENTRY)
     else:
-        if page.has_element(selectors.HOME_PERSON_SPACE_ENTRY):
-            page.click_element(selectors.HOME_PERSON_SPACE_ENTRY)
-        else:
-            page.navigate("https://i.chaoxing.com")
-        page.wait_for_load(20)
-        time.sleep(2)
+        page.navigate("https://i.chaoxing.com")
+    page.wait_for_load(10)
+    time.sleep(1)
 
-        # 在个人空间外壳页点击课程菜单
-        space_state = detect_page_state(page)
-        if space_state["page"] == "space_wrapper":
-            if page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK):
-                page.click_element(selectors.SPACE_WRAPPER_COURSE_LINK)
-                page.wait_for_load(20)
-                time.sleep(2)
-        elif space_state["page"] == "personal_space":
-            # 有些用户直接在 personal_space 页面
-            pass
+    nav_state = detect_page_state(page)
+    if nav_state["page"] == "space_wrapper":
+        courses = parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
+        if courses:
+            cache_set("courseList", courses, source="navigation")
+            print_json(
+                _make_response(
+                    ok=True,
+                    command="go-to-course-list",
+                    state=nav_state["page"],
+                    data={"source": "navigation", "count": len(courses), "courses": courses},
+                    elapsed_ms=_now_ms(t0),
+                )
+            )
+            return
 
-    # 最终尝试列课
-    final_state = detect_page_state(page)
-    if final_state["page"] in ("course_list", "space_wrapper"):
-        courses = (
-            parse_course_list_from_frame(page, selectors.SPACE_WRAPPER_FRAME)
-            if final_state["page"] == "space_wrapper"
-            else parse_course_list(page)
+    # 4. 失败
+    actions = allowed_actions_for_state(nav_state)
+    print_json(
+        _make_response(
+            ok=False,
+            command="go-to-course-list",
+            state=nav_state["page"],
+            error_code="COURSE_LIST_UNAVAILABLE",
+            error_message="无法获取课程列表 — 请确认已登录学习通并执行 where-am-i",
+            allowed_actions=actions,
+            elapsed_ms=_now_ms(t0),
         )
-        print_json(
-            {
-                "ok": True,
-                "command": "go-to-course-list",
-                "source": final_state["page"],
-                "count": len(courses),
-                "courses": courses,
-            }
-        )
-    else:
-        print_json(
-            {
-                "ok": False,
-                "command": "go-to-course-list",
-                "reason": "无法到达课程列表页",
-                "pageState": final_state,
-            }
-        )
+    )
 
 
 def cmd_open_course_by_id(page: BridgePage, args: argparse.Namespace) -> None:
