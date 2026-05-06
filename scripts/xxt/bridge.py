@@ -68,3 +68,15 @@ class BridgePage:
             "query_elements",
             {"selector": selector, "limit": limit, "attrs": attrs or []},
         )
+
+    def run_course(self, course_id: str, clazz_id: str, cpi: str = "") -> Any:
+        """触发 MAIN world 内自循环刷课, 立即返回"""
+        return self._call("run_course", {"courseId": course_id, "clazzId": clazz_id, "cpi": cpi})
+
+    def request_pause(self) -> None:
+        """请求暂停刷课"""
+        self._call("request_pause")
+
+    def get_study_status(self) -> Any:
+        """获取刷课状态 (active/courseId/url)"""
+        return self._call("get_study_status")

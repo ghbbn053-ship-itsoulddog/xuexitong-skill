@@ -1316,271 +1316,124 @@ def _run_course_loop(
     enc: str | None,
     max_chapters: int,
 ) -> None:
-
-    # --- 进度持久化：同名课程续跑，换课程重置 ---
+    """
+    MAIN world 自循环刷课:
+    1. 导航到章节任务页, 点第一个未完成章节进入学习页
+    2. 发送 run_course → content.js 在 MAIN world 内自循环处理所有任务点
+    3. Python 端只负责轮询状态和处理暂停
+    """
     existing = load_runtime_state()
-    same_course = (
-        existing.get("course_id") == course_id
-        and existing.get("loop_active")
-    )
-
-    if same_course:
-        # 续跑：保留已完成章节和视频计数
-        completed_chapters = existing.get("completed_chapters", [])
-        blocked_items = existing.get("blocked_items", [])
-        total_videos_watched = existing.get("total_videos_watched", 0)
-        last_chapter_id = existing.get("last_completed_chapter_id")
-        last_task_num = existing.get("last_completed_task_num", 0)
-        resume_msg = (
-            f"续跑模式：已完成 {len(completed_chapters)} 章，"
-            f"{total_videos_watched} 个视频"
-        )
-        if last_chapter_id:
-            resume_msg += f"，上次停在章节 {last_chapter_id} 任务点 {last_task_num}"
+    if existing.get("course_id") == course_id and existing.get("loop_active"):
         print_json(_make_response(
             ok=True, command="run-course",
-            data={"action": "resuming", "detail": resume_msg},
+            data={"action": "resuming", "detail": "续跑模式"},
         ))
-    else:
-        completed_chapters = []
-        blocked_items = []
-        total_videos_watched = 0
-        last_chapter_id = None
-        last_task_num = 0
 
     merge_runtime_state(
-        course_id=course_id,
-        clazz_id=clazz_id,
-        cpi=cpi,
-        enc=enc,
-        pause_requested=False,
-        loop_active=True,
-        completed_chapters=completed_chapters,
-        blocked_items=blocked_items,
-        total_videos_watched=total_videos_watched,
-        last_completed_chapter_id=last_chapter_id,
-        last_completed_task_num=last_task_num,
+        course_id=course_id, clazz_id=clazz_id, cpi=cpi, enc=enc,
+        pause_requested=False, loop_active=True,
     )
 
+    # 导航到章节任务页
     chapter_task_url = (
         "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
         f"?courseid={course_id}&clazzid={clazz_id}&cpi={cpi}&ut=s"
     )
     page.navigate(chapter_task_url)
     page.wait_for_load(20)
-    time.sleep(2)
+    time.sleep(3)
 
-    chapters_processed = 0
+    # 点第一个未完成章节进入学习页
+    wait_for_element(page, selectors.CHAPTER_PAGE_COURSETREE, timeout_s=12.0)
+    outline = parse_chapter_outline(page)
+    first = next(
+        (it for it in outline.get("items", [])
+         if (it.get("unfinishedTaskPoints") or 0) > 0),
+        None,
+    )
+    if not first:
+        print_json(_make_response(
+            ok=True, command="run-course",
+            data={"action": "course_complete", "chaptersProcessed": 0},
+        ))
+        return
 
-    while chapters_processed < max_chapters:
-        rt = load_runtime_state()
-        if rt.get("pause_requested"):
-            print_json(_make_response(
-                ok=True, command="run-course",
-                data={"action": "paused", "chaptersProcessed": chapters_processed},
-            ))
-            return
-
-        # 确保在章节任务页
-        state = detect_page_state(page)
-        if state["page"] != "chapter_task":
-            page.navigate(chapter_task_url)
-            page.wait_for_load(20)
-            time.sleep(2)
-            state = detect_page_state(page)
-            if state["page"] != "chapter_task":
-                print_json(_make_response(
-                    ok=False, command="run-course",
-                    error_code="NAVIGATION_FAILED",
-                    error_message="无法到达章节任务页",
-                    data={"chaptersProcessed": chapters_processed},
-                ))
-                return
-
-        wait_for_element(page, selectors.CHAPTER_PAGE_COURSETREE, timeout_s=12.0)
-        chapter_outline = parse_chapter_outline(page)
-
-        next_chapter = next(
-            (
-                item
-                for item in chapter_outline["items"]
-                if (item.get("unfinishedTaskPoints") or 0) > 0
-                and item["chapterId"] not in rt.get("completed_chapters", [])
-            ),
-            None,
-        )
-
-        if not next_chapter:
-            print_json(_make_response(
-                ok=True, command="run-course",
-                data={"action": "course_complete", "chaptersProcessed": chapters_processed},
-            ))
-            return
-
-        chapter_id = next_chapter["chapterId"]
-
-        # 点击章节进入学习页
-        page.click_element(f"#{next_chapter['domId']}")
+    dom_id = first.get("domId", "")
+    if dom_id:
+        page.click_element(f"#{dom_id}")
         page.wait_for_load(20)
-        time.sleep(2)
+        time.sleep(3)
 
-        study_state = detect_page_state(page)
-        if study_state["page"] == "study_page":
-            capture_context_from_study_page(page)
-
-        # 处理当前章节的所有任务点
-        # 续跑：如上次停在同一章节，从上次任务点继续，否则从 0 开始
-        rt_pre = load_runtime_state()
-        same_chapter = rt_pre.get("last_completed_chapter_id") == chapter_id
-        task_num = rt_pre.get("last_completed_task_num", 0) if same_chapter else 0
-        max_tasks = 50
-        chapter_done = True  # assume complete：遇 break 才改 False
-
-        while task_num < max_tasks:
-            rt = load_runtime_state()
-            if rt.get("pause_requested"):
-                chapter_done = False
-                break
-
-            current_state = detect_page_state(page)
-
-            if current_state["page"] == "study_page":
-                context = capture_context_from_study_page(page)
-                card_src = context.get("cardIframeSrc")
-                if not card_src or card_src == "about:blank":
-                    chapter_done = False
-                    break
-                cur_url = context.get("currentUrl") or ""
-                target_url = build_absolute_url(cur_url, card_src)
-                page.navigate(target_url)
-                page.wait_for_load(20)
-                time.sleep(1)
-                capture_context_from_task_card(page)
-                continue
-
-            if current_state["page"] == "task_card":
-                rt = load_runtime_state()
-                if rt.get("pause_requested"):
-                    chapter_done = False
-                    break
-
-                video_tasks = inspect_video_tasks(page)
-
-                if video_tasks.get("videoTaskCount", 0) > 0:
-                    playback = get_video_playback_state(page)
-                    player = playback.get("playerState") or {}
-
-                    if player.get("ended"):
-                        # 视频已结束，跳到下一任务点
-                        task_num += 1
-                        merge_runtime_state(
-                            total_videos_watched=rt.get("total_videos_watched", 0) + 1,
-                            last_completed_chapter_id=chapter_id,
-                            last_completed_task_num=task_num,
-                        )
-                        goto_study_page_from_state(page)
-                        time.sleep(2)
-                        page.wait_for_load(20)
-
-                        # 跳 num+1
-                        ctx = capture_context_from_study_page(page)
-                        next_card_src = ctx.get("cardIframeSrc") or ""
-                        if next_card_src and next_card_src != "about:blank":
-                            try:
-                                cur_u = ctx.get("currentUrl") or ""
-                                parsed = urlparse(next_card_src)
-                                params_n = parse_qs(parsed.query)
-                                next_num = int(params_n.get("num", ["0"])[0]) + 1
-                                params_n["num"] = [str(next_num)]
-                                new_q = urlencode(params_n, doseq=True)
-                                next_card = urlunparse(parsed._replace(query=new_q))
-                                next_card = build_absolute_url(cur_u, next_card)
-                                page.navigate(next_card)
-                                page.wait_for_load(20)
-                                time.sleep(1)
-                                capture_context_from_task_card(page)
-                            except Exception:
-                                chapter_done = False
-                                break
-                        else:
-                            chapter_done = False
-                            break
-                        continue
-
-                    # 视频未结束，启动播放并轮询等待结束
-                    arm_video_guard(page)
-                    mute_video_task(page, True)
-                    play_video_task(page)
-
-                    video_deadline = time.time() + 1800
-                    while time.time() < video_deadline:
-                        rt2 = load_runtime_state()
-                        if rt2.get("pause_requested"):
-                            break
-                        pb = get_video_playback_state(page)
-                        p = pb.get("playerState") or {}
-                        if p.get("ended"):
-                            break
-                        if detect_page_state(page)["page"] != "task_card":
-                            break
-                        time.sleep(3)
-                    continue
-
-                # 无视频任务 — 检查作业/测验阻塞
-                task_page = inspect_task_page(page)
-                body = task_page.get("bodyTextPreview") or ""
-                if any(k in body for k in ["作业", "测验", "考试", "题", "答题"]):
-                    merge_runtime_state(
-                        blocked_items=rt.get("blocked_items", [])
-                        + [
-                            {
-                                "chapterId": chapter_id,
-                                "taskNum": task_num,
-                                "type": "quiz_or_assignment",
-                            }
-                        ]
-                    )
-                    goto_study_page_from_state(page)
-                    time.sleep(2)
-                    page.wait_for_load(20)
-                    task_num += 1
-                    continue
-
-                # 无视频、无阻塞 = 空任务点
-                task_num += 1
-                continue
-
-            # 不在预期页面，退出当前章节
-            chapter_done = False
+    # 等待学习页就绪, 然后触发 MAIN world 自循环
+    for _ in range(10):
+        st = detect_page_state(page)
+        if st["page"] == "study_page":
             break
+        time.sleep(1)
 
-        if chapter_done:
-            chapters_processed += 1
-            merge_runtime_state(
-                completed_chapters=rt.get("completed_chapters", []) + [chapter_id],
-                last_completed_chapter_id=chapter_id,
-                last_completed_task_num=0,
-            )
-        else:
-            # 非正常退出（pause / 错误 / about:blank）— 不标记完成，下次续跑同一章
-            merge_runtime_state(
-                last_completed_chapter_id=chapter_id,
-                last_completed_task_num=task_num,
-            )
-        page.navigate(chapter_task_url)
-        page.wait_for_load(20)
-        time.sleep(2)
+    # 等 3s 让 content.js 完成注入
+    time.sleep(3)
 
-    final_rt = load_runtime_state()
     print_json(_make_response(
         ok=True, command="run-course",
-        data={
-            "action": "finished",
-            "chaptersProcessed": chapters_processed,
-            "totalVideosWatched": final_rt.get("total_videos_watched", 0),
-            "blockedItems": final_rt.get("blocked_items", []),
-            "completedChapters": final_rt.get("completed_chapters", []),
-        },
+        data={"action": "started", "detail": "MAIN world 自循环已启动"},
+    ))
+
+    # 重试 3 次, 容错页面跳转间隙
+    result = None
+    for attempt in range(3):
+        try:
+            result = page.run_course(course_id, clazz_id, cpi)
+            break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2)
+                continue
+            print_json(_make_response(
+                ok=False, command="run-course",
+                error_message=str(e),
+            ))
+            return
+
+    # 轮询监控
+    deadline = time.time() + 7200  # 最多跑 2 小时
+    last_url = ""
+    while time.time() < deadline:
+        rt = load_runtime_state()
+        if rt.get("pause_requested"):
+            page.request_pause()
+            print_json(_make_response(
+                ok=True, command="run-course",
+                data={"action": "paused"},
+            ))
+            return
+
+        try:
+            status = page.get_study_status()
+        except Exception:
+            time.sleep(5)
+            continue
+
+        if not status or not status.get("active"):
+            print_json(_make_response(
+                ok=True, command="run-course",
+                data={"action": "course_complete"},
+            ))
+            return
+
+        cur_url = status.get("url", "")
+        if cur_url != last_url:
+            last_url = cur_url
+            print_json(_make_response(
+                ok=True, command="run-course",
+                data={"action": "running", "url": cur_url[:120]},
+            ))
+
+        time.sleep(5)
+
+    print_json(_make_response(
+        ok=True, command="run-course",
+        data={"action": "finished", "detail": "轮询超时"},
     ))
 
 

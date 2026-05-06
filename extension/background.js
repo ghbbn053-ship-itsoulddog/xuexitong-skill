@@ -3,7 +3,15 @@ let ws = null;
 let lastKnownTabId = null;
 
 chrome.alarms.create("keepAlive", { periodInMinutes: 2 });
-chrome.alarms.onAlarm.addListener(() => {
+chrome.alarms.create("wsPing", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "wsPing") {
+    // 保持 WebSocket 不闲置断开
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ ping: true })); } catch (_) {}
+    }
+    return;
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) connect();
 });
 
@@ -52,7 +60,7 @@ async function handleCommand(msg) {
     case "debug_tabs":
       return await cmdDebugTabs();
     case "evaluate":
-      return await cmdEvaluate(method, params);
+      return await cmdDom(method, params);
     case "frame_snapshot":
     case "frame_evaluate":
       return await cmdDom(method, params);
@@ -142,77 +150,6 @@ function waitForTabComplete(tabId, timeout) {
   });
 }
 
-async function cmdEvaluate(method, params) {
-  const tab = await getActiveTab();
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      world: "MAIN",
-      func: pageExecutor,
-      args: [method, params]
-    });
-    return results?.[0]?.result ?? null;
-  } catch (err) {
-    const msg = String(err && err.message ? err.message : err);
-    if (!msg.includes("Blocked")) {
-      throw err;
-    }
-    return await cmdEvaluateViaDebugger(tab.id, method, params);
-  }
-}
-
-function pageExecutor(method, params) {
-  switch (method) {
-    case "evaluate":
-      return Function(`"use strict"; return (${params.expression})`)();
-    case "has_element":
-      return document.querySelector(params.selector) !== null;
-    case "get_element_text": {
-      const el = document.querySelector(params.selector);
-      return el ? el.textContent : null;
-    }
-    case "get_element_attribute": {
-      const el = document.querySelector(params.selector);
-      return el ? el.getAttribute(params.attr) : null;
-    }
-    case "get_url":
-      return window.location.href;
-    default:
-      throw new Error(`未知方法: ${method}`);
-  }
-}
-
-async function cmdEvaluateViaDebugger(tabId, method, params) {
-  await attachDebugger(tabId);
-  try {
-    let expression = "";
-    switch (method) {
-      case "evaluate":
-        expression = params.expression;
-        break;
-      default:
-        throw new Error(`未知 evaluate 方法: ${method}`);
-    }
-
-    const result = await chrome.debugger.sendCommand(
-      { tabId },
-      "Runtime.evaluate",
-      {
-        expression,
-        returnByValue: true,
-        awaitPromise: true,
-      },
-    );
-    const value = result?.result?.value;
-    if (value && typeof value === "object" && value.__error) {
-      throw new Error(value.__error);
-    }
-    return value ?? null;
-  } finally {
-    await detachDebugger(tabId);
-  }
-}
-
 async function cmdDom(method, params) {
   const tab = await getActiveTab();
 
@@ -236,47 +173,6 @@ async function cmdDom(method, params) {
       return await cmdDomViaDebugger(tab.id, method, params);
     }
     throw err;
-  }
-}
-
-function domExecutor(method, params) {
-  try {
-    switch (method) {
-      case "has_element":
-        return document.querySelector(params.selector) !== null;
-      case "get_element_text": {
-        const el = document.querySelector(params.selector);
-        return el ? el.textContent : null;
-      }
-      case "get_element_attribute": {
-        const el = document.querySelector(params.selector);
-        return el ? el.getAttribute(params.attr) : null;
-      }
-      case "get_url":
-        return window.location.href;
-      case "query_elements":
-        return queryElementsFallback(params);
-      case "click_element": {
-        const el = document.querySelector(params.selector);
-        if (!el) return { __error: `元素不存在: ${params.selector}` };
-        el.scrollIntoView({ block: "center" });
-        el.click();
-        return null;
-      }
-      case "input_text": {
-        const el = document.querySelector(params.selector);
-        if (!el) return { __error: `元素不存在: ${params.selector}` };
-        el.focus();
-        el.value = params.text;
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-        return null;
-      }
-      default:
-        return { __error: `未知命令: ${method}` };
-    }
-  } catch (e) {
-    return { __error: String(e && e.message ? e.message : e) };
   }
 }
 
@@ -324,6 +220,8 @@ async function detachDebugger(tabId) {
 
 function buildDebuggerExpression(method, params) {
   switch (method) {
+    case "evaluate":
+      return params.expression;
     case "has_element":
       return `(() => document.querySelector(${JSON.stringify(params.selector)}) !== null)()`;
     case "get_element_text":
@@ -386,6 +284,12 @@ function buildDebuggerExpression(method, params) {
         if (!frameDocument) return { __error: 'iframe不可访问: ${escapeForError(params.selector)}' };
         return (${params.expression});
       })()`;
+    case "run_course":
+      return `(typeof startAutoRun === 'function' ? startAutoRun(${JSON.stringify(params)}) : { error: 'content.js 未加载, 请刷新页面后重试' })`;
+    case "request_pause":
+      return `(typeof requestPause === 'function' ? (requestPause(), null) : null)`;
+    case "get_study_status":
+      return `(typeof getStudyStatus === 'function' ? getStudyStatus() : { active: false, url: window.location.href })`;
     default:
       return `(() => ({ __error: '未知命令: ${escapeForError(method)}' }))()`;
   }
@@ -395,23 +299,3 @@ function escapeForError(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-function queryElementsFallback(params) {
-  const selector = params.selector;
-  const limit = Math.max(1, Math.min(params.limit || 20, 200));
-  const attrNames = Array.isArray(params.attrs) ? params.attrs : [];
-  const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-  return Array.from(document.querySelectorAll(selector)).slice(0, limit).map((el, index) => {
-    const attrs = {};
-    for (const name of attrNames) {
-      attrs[name] = el.getAttribute(name);
-    }
-    return {
-      index,
-      tag: el.tagName,
-      id: el.id || null,
-      className: typeof el.className === "string" ? el.className : null,
-      text: clean(el.textContent || "").slice(0, 300),
-      attrs,
-    };
-  });
-}
