@@ -176,81 +176,54 @@ def read_frame_src(page: BridgePage, selector: str) -> str | None:
     return safe_get_element_attribute(page, selector, "src")
 
 
-def parse_course_list_from_frame(page: BridgePage, frame_selector: str) -> list[dict[str, Any]]:
-    return page.frame_evaluate(
-        frame_selector,
-        """
-        (() => {
-            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim() || null;
-            return Array.from(frameDocument.querySelectorAll('#courseList li.course')).map((li) => {
-                const link = li.querySelector('a.color1');
-                const name = li.querySelector('.course-name');
-                const teacherCandidates = Array.from(li.querySelectorAll('.line2'))
-                  .map((el) => clean(el.textContent))
-                  .filter(Boolean);
-                const teacher = teacherCandidates.length ? teacherCandidates[teacherCandidates.length - 1] : null;
-                const id = li.id || null;
-                const match = id ? id.match(/^course_(\\d+)_(\\d+)$/) : null;
-                let cpi = null, enc = null;
-                if (link && link.href) {
-                    try {
-                        const u = new URL(link.href);
-                        cpi = u.searchParams.get('cpi') || null;
-                        enc = u.searchParams.get('enc') || null;
-                    } catch(e) {}
-                }
-                return {
-                  id,
-                  courseId: match ? match[1] : null,
-                  clazzId: match ? match[2] : null,
-                  cpi,
-                  enc,
-                  title: clean(name ? name.textContent : null),
-                  teacher,
-                  href: link ? link.href : null
-                };
-            });
-        })()
-        """,
+def _course_list_js(root: str) -> str:
+    # 新版课程列表为 <div class="course"> (旧版 <li class="course">), courseId/clazzId
+    # 藏在隐藏 input 里, 旧版则在 li.id 的 course_<cid>_<clid> 中
+    return (
+        '(() => {'
+        '    const clean = (value) => (value || "").replace(/\\s+/g, " ").trim() || null;'
+        f'    return Array.from({root}.querySelectorAll("#courseList .course")).map((el) => {{'
+        '        const link = el.querySelector("a.color1") || el.querySelector(\'a[href*="courseid"]\');'
+        '        const name = el.querySelector(".course-name");'
+        '        const teacherCandidates = Array.from(el.querySelectorAll(".line2"))'
+        '          .map((t) => clean(t.textContent))'
+        '          .filter(Boolean);'
+        '        const teacher = teacherCandidates.length ? teacherCandidates[teacherCandidates.length - 1] : null;'
+        '        const idInput = el.querySelector(\'input.courseId, input[name="courseId"]\');'
+        '        const clazzInput = el.querySelector(\'input.clazzId, input[name="clazzId"]\');'
+        '        const courseId = idInput ? (idInput.value || null) : null;'
+        '        const clazzId = clazzInput ? (clazzInput.value || null) : null;'
+        '        const id = el.id || null;'
+        '        const match = id ? id.match(/^course_(\\d+)_(\\d+)$/) : null;'
+        '        let cpi = null, enc = null;'
+        '        if (link && link.href) {'
+        '            try {'
+        '                const u = new URL(link.href);'
+        '                cpi = u.searchParams.get("cpi") || null;'
+        '                enc = u.searchParams.get("enc") || null;'
+        '            } catch(e) {}'
+        '        }'
+        '        return {'
+        '          id,'
+        '          courseId: courseId || (match ? match[1] : null),'
+        '          clazzId: clazzId || (match ? match[2] : null),'
+        '          cpi,'
+        '          enc,'
+        '          title: clean(name ? name.textContent : (link ? link.textContent : null)),'
+        '          teacher,'
+        '          href: link ? link.href : null'
+        '        };'
+        '    }).filter((c) => c.courseId && c.clazzId);'
+        '})()'
     )
+
+
+def parse_course_list_from_frame(page: BridgePage, frame_selector: str) -> list[dict[str, Any]]:
+    return page.frame_evaluate(frame_selector, _course_list_js("frameDocument"))
 
 
 def parse_course_list(page: BridgePage) -> list[dict[str, Any]]:
-    return page.evaluate(
-        """
-        (() => {
-            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim() || null;
-            return Array.from(document.querySelectorAll('#courseList li.course')).map((li) => {
-                const link = li.querySelector('a.color1');
-                const name = li.querySelector('.course-name');
-                const teacherCandidates = Array.from(li.querySelectorAll('.line2'))
-                  .map((el) => clean(el.textContent))
-                  .filter(Boolean);
-                const teacher = teacherCandidates.length ? teacherCandidates[teacherCandidates.length - 1] : null;
-                const id = li.id || null;
-                const match = id ? id.match(/^course_(\\d+)_(\\d+)$/) : null;
-                let cpi = null, enc = null;
-                if (link && link.href) {
-                    try {
-                        const u = new URL(link.href);
-                        cpi = u.searchParams.get('cpi') || null;
-                        enc = u.searchParams.get('enc') || null;
-                    } catch(e) {}
-                }
-                return {
-                  id,
-                  courseId: match ? match[1] : null,
-                  clazzId: match ? match[2] : null,
-                  cpi,
-                  enc,
-                  title: clean(name ? name.textContent : null),
-                  teacher,
-                  href: link ? link.href : null
-                };
-            });
-        })()
-        """
-    )
+    return page.evaluate(_course_list_js("document"))
 
 
 def parse_study_state(raw: str | None) -> dict[str, Any] | None:

@@ -67,7 +67,11 @@ def detect_page_state(page: PageLike) -> dict[str, Any]:
         pass
 
     try:
-        if page.has_element(selectors.SPACE_WRAPPER_FRAME) and page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK):
+        # 新版个人空间 (i.chaoxing.com/base) 去掉了 #zne_kc_icon, 改用 #siteName 识别
+        if page.has_element(selectors.SPACE_WRAPPER_FRAME) and (
+            page.has_element(selectors.SPACE_WRAPPER_COURSE_LINK)
+            or page.has_element(selectors.SPACE_SITE_NAME)
+        ):
             return {
                 "page": "space_wrapper",
                 "loggedIn": True,

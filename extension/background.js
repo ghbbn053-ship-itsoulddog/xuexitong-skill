@@ -270,7 +270,7 @@ function buildDebuggerExpression(method, params) {
           title: frameDocument.title || null,
           readyState: frameDocument.readyState || null,
           bodyText: ((frameDocument.body && frameDocument.body.innerText) || '').slice(0, 1200),
-          courseItems: frameDocument.querySelectorAll('#courseList li.course').length,
+          courseItems: frameDocument.querySelectorAll('#courseList .course').length,
           hasCourseList: !!frameDocument.querySelector('#courseList'),
           frameCount: frameDocument.querySelectorAll('iframe').length
         };

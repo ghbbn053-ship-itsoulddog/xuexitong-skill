@@ -103,7 +103,7 @@ function frameSnapshot(selector) {
     title: fd.title || null,
     readyState: fd.readyState || null,
     bodyText: ((fd.body && fd.body.innerText) || "").slice(0, 1200),
-    courseItems: fd.querySelectorAll("#courseList li.course").length,
+    courseItems: fd.querySelectorAll("#courseList .course").length,
     hasCourseList: !!fd.querySelector("#courseList"),
     frameCount: fd.querySelectorAll("iframe").length
   };
